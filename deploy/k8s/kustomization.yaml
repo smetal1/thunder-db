@@ -1,0 +1,16 @@
+apiVersion: kustomize.io/v1beta1
+kind: Kustomization
+
+namespace: thunderdb
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - statefulset.yaml
+  - service.yaml
+  - pdb.yaml
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: thunderdb

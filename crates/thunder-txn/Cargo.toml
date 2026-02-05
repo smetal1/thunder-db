@@ -1,0 +1,33 @@
+[package]
+name = "thunder-txn"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Transaction manager for ThunderDB - MVCC, CCP, deadlock detection"
+
+[dependencies]
+thunder-common.workspace = true
+thunder-storage.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[[bench]]
+name = "txn_bench"
+harness = false

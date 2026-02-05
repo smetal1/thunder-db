@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  thunderdb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: thunderdb
+    ports:
+      - "5432:5432"   # PostgreSQL protocol
+      - "3306:3306"   # MySQL protocol
+      - "6379:6379"   # RESP (Redis) protocol
+      - "8080:8080"   # HTTP API & Dashboard
+      - "9090:9090"   # gRPC
+    volumes:
+      - thunderdb-data:/var/lib/thunderdb/data
+      - thunderdb-wal:/var/lib/thunderdb/wal
+      - thunderdb-logs:/var/log/thunderdb
+    environment:
+      - RUST_LOG=info
+      - THUNDER_DATA_DIR=/var/lib/thunderdb/data
+      - THUNDER_WAL_DIR=/var/lib/thunderdb/wal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  thunderdb-data:
+  thunderdb-wal:
+  thunderdb-logs:

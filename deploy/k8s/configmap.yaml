@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thunderdb-config
+  namespace: thunderdb
+  labels:
+    app.kubernetes.io/name: thunderdb
+data:
+  thunderdb.toml: |
+    node_id = 1
+    listen_addr = "0.0.0.0"
+    pg_port = 5432
+    mysql_port = 3306
+    resp_port = 6379
+    http_port = 8080
+    grpc_port = 9090
+
+    data_dir = "/var/lib/thunderdb/data"
+    wal_dir = "/var/lib/thunderdb/wal"
+
+    query_timeout = "30s"
+    max_result_rows = 1000000
+
+    [storage]
+    buffer_pool_size = 1073741824
+    wal_buffer_size = 67108864
+    page_size = 16384
+    checkpoint_interval = "5m"
+    compaction_threads = 4
+    direct_io = true
+    compression = true
+    compression_algorithm = "Lz4"
+    max_wal_size = 2147483648
+    sync_commit = true
+    disk_space_warn_percent = 10.0
+    disk_space_critical_percent = 5.0
+    disk_check_interval = "30s"
+
+    [cluster]
+    cluster_name = "thunderdb-k8s"
+    peers = []
+    raft_election_timeout = "1s"
+    raft_heartbeat_interval = "100ms"
+    replication_factor = 1
+    max_region_size = 268435456
+    min_region_size = 67108864
+    auto_balance = false
+
+    [security]
+    authentication_enabled = true
+    tls_enabled = false
+    superuser = "admin"
+    # Password hash is injected via THUNDERDB_SUPERUSER_PASSWORD_HASH env var from Secret
+
+    [logging]
+    level = "info"
+    format = "json"
+    slow_query_enabled = true
+    slow_query_threshold = "1s"

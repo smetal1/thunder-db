@@ -1,0 +1,56 @@
+# ThunderDB Docker Configuration
+
+# Node identification
+node_id = 1
+
+# Network settings - listen on all interfaces for Docker
+listen_addr = "0.0.0.0"
+pg_port = 5432
+mysql_port = 3306
+resp_port = 6379
+http_port = 8080
+grpc_port = 9090
+
+# Data directories - Docker volumes
+data_dir = "/var/lib/thunderdb/data"
+wal_dir = "/var/lib/thunderdb/wal"
+
+# Storage configuration
+[storage]
+buffer_pool_size = 268435456  # 256MB
+wal_buffer_size = 33554432    # 32MB
+page_size = 16384             # 16KB
+checkpoint_interval = "60s"
+compaction_threads = 4
+direct_io = false
+compression = true
+compression_algorithm = "Lz4"
+max_wal_size = 2147483648     # 2GB
+sync_commit = true
+
+# Cluster configuration
+[cluster]
+cluster_name = "thunderdb-docker"
+peers = []
+raft_election_timeout = "1s"
+raft_heartbeat_interval = "100ms"
+replication_factor = 1
+max_region_size = 536870912   # 512MB
+min_region_size = 134217728   # 128MB
+auto_balance = false
+
+# Security configuration
+[security]
+authentication_enabled = true
+tls_enabled = false
+superuser = "admin"
+# In Docker, set THUNDERDB_SUPERUSER_PASSWORD_HASH env var instead of plaintext.
+# Generate with: thunderdb --hash-password "your-secure-password"
+superuser_password = "changeme"
+
+# Logging configuration
+[logging]
+level = "info"
+format = "text"
+slow_query_enabled = true
+slow_query_threshold = "1s"

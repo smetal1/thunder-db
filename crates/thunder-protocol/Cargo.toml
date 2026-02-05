@@ -1,0 +1,49 @@
+[package]
+name = "thunder-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Wire protocol implementations for ThunderDB - PostgreSQL, MySQL, RESP"
+
+[dependencies]
+thunder-common.workspace = true
+thunder-sql.workspace = true
+thunder-query.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+lru.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+md-5 = "0.10"
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+subtle = "2.5"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2.1"
+webpki-roots = "0.26"
+socket2.workspace = true
+arc-swap.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio-postgres.workspace = true

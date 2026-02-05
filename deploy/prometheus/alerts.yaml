@@ -1,0 +1,168 @@
+# Prometheus Alerting Rules for ThunderDB
+#
+# These rules monitor core health, performance, storage, connectivity,
+# replication, and backup status of ThunderDB instances.
+
+groups:
+  - name: thunderdb_alerts
+    rules:
+      # ---------------------------------------------------------------
+      # 1. ThunderDBDown
+      #    Fires when a ThunderDB instance is completely unreachable.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBDown
+        expr: up{job="thunderdb"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ThunderDB instance {{ $labels.instance }} is down"
+          description: >-
+            The ThunderDB instance {{ $labels.instance }} has been
+            unreachable for more than 5 minutes. Immediate investigation
+            is required to restore service availability.
+
+      # ---------------------------------------------------------------
+      # 2. ThunderDBHighErrorRate
+      #    Fires when more than 5% of queries are failing.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBHighErrorRate
+        expr: |
+          (
+            rate(thunderdb_queries_total{status="error"}[5m])
+            /
+            rate(thunderdb_queries_total[5m])
+          ) * 100 > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ThunderDB high query error rate on {{ $labels.instance }}"
+          description: >-
+            The query failure rate on {{ $labels.instance }} has exceeded
+            5% for the last 10 minutes (current value: {{ $value | printf "%.2f" }}%).
+            Check application logs and query patterns for root cause.
+
+      # ---------------------------------------------------------------
+      # 3. ThunderDBSlowQueries
+      #    Fires when the p99 query latency exceeds 5 seconds.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBSlowQueries
+        expr: |
+          histogram_quantile(
+            0.99,
+            rate(thunderdb_query_duration_seconds_bucket[5m])
+          ) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ThunderDB p99 query latency is high on {{ $labels.instance }}"
+          description: >-
+            The 99th-percentile query latency on {{ $labels.instance }}
+            has been above 5 seconds for more than 15 minutes
+            (current value: {{ $value | printf "%.2f" }}s). Review slow
+            query logs and consider adding indexes or optimizing queries.
+
+      # ---------------------------------------------------------------
+      # 4. ThunderDBDiskSpaceLow
+      #    Fires when free disk space drops below 10%.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBDiskSpaceLow
+        expr: |
+          (
+            thunderdb_disk_free_bytes
+            /
+            thunderdb_disk_total_bytes
+          ) * 100 < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ThunderDB disk space is low on {{ $labels.instance }}"
+          description: >-
+            The disk backing {{ $labels.instance }} has less than 10%
+            free space remaining for the last 10 minutes
+            (current free: {{ $value | printf "%.2f" }}%). Plan capacity
+            expansion or clean up stale data to avoid service disruption.
+
+      # ---------------------------------------------------------------
+      # 5. ThunderDBDiskSpaceCritical
+      #    Fires when free disk space drops below 5%.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBDiskSpaceCritical
+        expr: |
+          (
+            thunderdb_disk_free_bytes
+            /
+            thunderdb_disk_total_bytes
+          ) * 100 < 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ThunderDB disk space is critically low on {{ $labels.instance }}"
+          description: >-
+            The disk backing {{ $labels.instance }} has less than 5%
+            free space remaining for the last 5 minutes
+            (current free: {{ $value | printf "%.2f" }}%). Immediate
+            action is required to prevent data loss or write failures.
+
+      # ---------------------------------------------------------------
+      # 6. ThunderDBHighConnections
+      #    Fires when connection usage exceeds 80% of the maximum.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBHighConnections
+        expr: |
+          (
+            thunderdb_connections_current
+            /
+            thunderdb_connections_max
+          ) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ThunderDB connection usage is high on {{ $labels.instance }}"
+          description: >-
+            {{ $labels.instance }} is using more than 80% of its maximum
+            allowed connections for the last 10 minutes
+            (current usage: {{ $value | printf "%.2f" }}%). Consider
+            increasing the connection limit or investigating connection
+            leaks in client applications.
+
+      # ---------------------------------------------------------------
+      # 7. ThunderDBReplicationLag
+      #    Fires when a replica falls more than 30 seconds behind.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBReplicationLag
+        expr: thunderdb_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ThunderDB replication lag is high on {{ $labels.instance }}"
+          description: >-
+            The replication lag on replica {{ $labels.instance }} has
+            exceeded 30 seconds for more than 5 minutes
+            (current lag: {{ $value | printf "%.1f" }}s). This may
+            indicate network issues, high write throughput on the
+            primary, or an under-resourced replica.
+
+      # ---------------------------------------------------------------
+      # 8. ThunderDBBackupFailed
+      #    Fires when no successful backup has been recorded in 48 hours.
+      # ---------------------------------------------------------------
+      - alert: ThunderDBBackupFailed
+        expr: time() - thunderdb_last_successful_backup_timestamp_seconds > 48 * 3600
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ThunderDB backup is overdue on {{ $labels.instance }}"
+          description: >-
+            No successful backup has been recorded for
+            {{ $labels.instance }} in the last 48 hours
+            (last backup: {{ $value | humanizeDuration }} ago).
+            Investigate the backup pipeline immediately to ensure data
+            durability.

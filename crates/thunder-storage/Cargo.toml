@@ -1,0 +1,47 @@
+[package]
+name = "thunder-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Storage engine for ThunderDB - row store, column store, WAL, B+Tree"
+
+[dependencies]
+thunder-common.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+crossbeam-epoch.workspace = true
+dashmap.workspace = true
+memmap2.workspace = true
+crc32fast.workspace = true
+xxhash-rust.workspace = true
+rocksdb.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-buffer.workspace = true
+
+# Encryption
+aes-gcm.workspace = true
+
+# Compression
+lz4_flex = "0.11"
+snap = "1.1"
+zstd = "0.13"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[[bench]]
+name = "storage_bench"
+harness = false

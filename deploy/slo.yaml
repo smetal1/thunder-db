@@ -1,0 +1,35 @@
+# ThunderDB Service Level Objectives
+slos:
+  availability:
+    target: 99.95%
+    measurement: health endpoint success rate
+    window: 30 days
+
+  query_latency_point:
+    target_p99: 100ms
+    description: Point query latency (single-row lookup)
+    measurement: thunderdb_query_duration_seconds{query_type="point"}
+    window: 30 days
+
+  query_latency_analytical:
+    target_p99: 5s
+    description: Analytical query latency
+    measurement: thunderdb_query_duration_seconds{query_type="analytical"}
+    window: 30 days
+
+  recovery_time:
+    target: 5 minutes
+    description: WAL replay recovery after crash
+    measurement: manual verification during chaos testing
+
+  backup:
+    frequency: daily
+    retention: 7 days
+    rpo: 24 hours
+    rto: 30 minutes
+    description: Recovery Point/Time Objectives for backup-based recovery
+
+  error_budget:
+    monthly_downtime_budget: 21.6 minutes  # 99.95% of 30 days
+    error_rate_threshold: 0.1%
+    description: Maximum acceptable error rate for non-infrastructure queries

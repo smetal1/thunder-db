@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thunderdb
+  namespace: thunderdb
+  labels:
+    app.kubernetes.io/name: thunderdb
+spec:
+  serviceName: thunderdb
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thunderdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thunderdb
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: thunderdb
+          image: thunderdb/thunderdb:latest
+          args:
+            - "--config"
+            - "/etc/thunderdb/thunderdb.toml"
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+            - name: resp
+              containerPort: 6379
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: thunderdb-credentials
+          env:
+            - name: THUNDERDB_AUTH_ENABLED
+              value: "true"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          startupProbe:
+            httpGet:
+              path: /admin/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /admin/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /admin/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/thunderdb
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/thunderdb/data
+            - name: wal
+              mountPath: /var/lib/thunderdb/wal
+      volumes:
+        - name: config
+          configMap:
+            name: thunderdb-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: thunderdb
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+    - metadata:
+        name: wal
+        labels:
+          app.kubernetes.io/name: thunderdb
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

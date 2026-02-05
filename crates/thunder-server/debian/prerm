@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+# Stop the service if running
+if [ -d /run/systemd/system ]; then
+    if systemctl is-active --quiet thunderdb; then
+        systemctl stop thunderdb
+    fi
+fi
+
+#DEBHELPER#

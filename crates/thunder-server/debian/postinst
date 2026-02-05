@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+# Create thunderdb user and group if they don't exist
+if ! getent group thunderdb >/dev/null; then
+    groupadd --system thunderdb
+fi
+
+if ! getent passwd thunderdb >/dev/null; then
+    useradd --system --gid thunderdb --home-dir /var/lib/thunderdb \
+        --shell /usr/sbin/nologin --comment "ThunderDB Server" thunderdb
+fi
+
+# Create data directories
+mkdir -p /var/lib/thunderdb/data
+mkdir -p /var/lib/thunderdb/wal
+chown -R thunderdb:thunderdb /var/lib/thunderdb
+chmod 750 /var/lib/thunderdb
+
+# Reload systemd
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+fi
+
+echo "ThunderDB installed successfully!"
+echo "Start the server with: sudo systemctl start thunderdb"
+echo "Enable on boot with: sudo systemctl enable thunderdb"
+
+#DEBHELPER#

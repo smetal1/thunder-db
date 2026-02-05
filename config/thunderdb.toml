@@ -1,0 +1,57 @@
+# ThunderDB Configuration File
+
+# Node identification
+node_id = 1
+
+# Network settings
+listen_addr = "0.0.0.0"
+pg_port = 5432
+mysql_port = 3306
+resp_port = 6379
+http_port = 8088
+grpc_port = 9090
+
+# Data directories
+data_dir = "/tmp/thunderdb/data"
+wal_dir = "/tmp/thunderdb/wal"
+
+# Storage configuration
+[storage]
+buffer_pool_size = 134217728  # 128MB
+wal_buffer_size = 16777216    # 16MB
+page_size = 16384             # 16KB
+checkpoint_interval = "60s"
+compaction_threads = 2
+direct_io = false
+compression = true
+compression_algorithm = "Lz4"
+max_wal_size = 1073741824     # 1GB
+sync_commit = true
+
+# Cluster configuration
+[cluster]
+cluster_name = "thunderdb-local"
+peers = []
+raft_election_timeout = "1s"
+raft_heartbeat_interval = "100ms"
+replication_factor = 1
+max_region_size = 268435456   # 256MB
+min_region_size = 67108864    # 64MB
+auto_balance = false
+
+# Security configuration
+[security]
+authentication_enabled = true
+tls_enabled = false
+superuser = "admin"
+# For production, use superuser_password_hash instead:
+#   Generate with: thunderdb --hash-password "your-secure-password"
+#   Or set env var: THUNDERDB_SUPERUSER_PASSWORD_HASH
+superuser_password = "changeme"
+
+# Logging configuration
+[logging]
+level = "info"
+format = "text"
+slow_query_enabled = true
+slow_query_threshold = "1s"

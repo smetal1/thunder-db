@@ -1,0 +1,50 @@
+[package]
+name = "thunder-sql"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SQL layer for ThunderDB - parser, analyzer, planner, optimizer"
+
+[features]
+default = []
+llm = ["llama-cpp-2"]
+ml = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub"]
+full = ["llm", "ml"]
+
+[dependencies]
+thunder-common.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+sqlparser.workspace = true
+arrow.workspace = true
+arrow-schema.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+regex = "1.10"
+parking_lot.workspace = true
+chrono = "0.4"
+dirs = "5.0"
+
+# LLM integration (optional)
+llama-cpp-2 = { version = "0.1", optional = true }
+
+# ML/Tensor operations (optional) - Hugging Face Candle
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.20", optional = true }
+hf-hub = { version = "0.3", optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }

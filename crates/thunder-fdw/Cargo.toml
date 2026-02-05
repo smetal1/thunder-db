@@ -1,0 +1,35 @@
+[package]
+name = "thunder-fdw"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Foreign Data Wrappers for ThunderDB - query external databases"
+
+[dependencies]
+thunder-common.workspace = true
+thunder-sql.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+tokio-postgres.workspace = true
+sqlx.workspace = true
+mongodb.workspace = true
+redis.workspace = true
+dashmap.workspace = true
+chrono.workspace = true
+libloading = "0.8"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }

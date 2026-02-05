@@ -1,0 +1,42 @@
+[package]
+name = "thunder-query"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Query executor for ThunderDB - vectorized execution, parallel processing"
+
+[dependencies]
+thunder-common.workspace = true
+thunder-storage.workspace = true
+thunder-txn.workspace = true
+thunder-sql.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-buffer.workspace = true
+arrow-schema.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[[bench]]
+name = "query_bench"
+harness = false

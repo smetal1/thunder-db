@@ -1,0 +1,95 @@
+[package]
+name = "thunder-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Main server binary for ThunderDB"
+
+[[bin]]
+name = "thunderdb"
+path = "src/main.rs"
+
+[features]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+thunder-common.workspace = true
+thunder-storage.workspace = true
+thunder-txn.workspace = true
+thunder-sql.workspace = true
+thunder-query.workspace = true
+thunder-cluster.workspace = true
+thunder-protocol.workspace = true
+thunder-cdc.workspace = true
+thunder-fdw.workspace = true
+thunder-vector.workspace = true
+thunder-api.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+axum-server.workspace = true
+axum.workspace = true
+config.workspace = true
+toml.workspace = true
+clap.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+lru.workspace = true
+
+# Disk space monitoring
+fs2.workspace = true
+
+# OpenTelemetry (optional, behind 'otel' feature)
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+# Memory allocator
+tikv-jemallocator.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[package.metadata.deb]
+name = "thunderdb"
+maintainer = "ThunderDB Team <team@thunderdb.io>"
+copyright = "2024, ThunderDB Team"
+extended-description = """
+ThunderDB is a high-performance distributed HTAP (Hybrid Transactional/Analytical Processing) database.
+
+Features:
+- OLTP and OLAP workloads in a single system
+- PostgreSQL wire protocol compatibility
+- Distributed transactions with MVCC
+- Columnar storage for analytics
+- Vector similarity search
+- Change data capture (CDC)
+- Foreign data wrappers (FDW)
+"""
+section = "database"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/thunderdb", "usr/bin/", "755"],
+    ["../../config/thunderdb.toml", "etc/thunderdb/thunderdb.toml", "644"],
+    ["../../scripts/thunderdb.service", "lib/systemd/system/thunderdb.service", "644"],
+]
+conf-files = ["/etc/thunderdb/thunderdb.toml"]
+maintainer-scripts = "debian/"

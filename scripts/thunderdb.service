@@ -1,0 +1,26 @@
+[Unit]
+Description=ThunderDB Database Server
+Documentation=https://thunderdb.io/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=thunderdb
+Group=thunderdb
+ExecStart=/usr/bin/thunderdb --config /etc/thunderdb/thunderdb.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/thunderdb
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

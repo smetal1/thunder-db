@@ -1,0 +1,40 @@
+[package]
+name = "thunder-cluster"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Distributed cluster management for ThunderDB - Raft consensus, sharding, replication"
+
+[dependencies]
+thunder-common.workspace = true
+thunder-storage.workspace = true
+thunder-txn.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+prost.workspace = true
+tonic.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+raft.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio-util.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+prost-build = "0.12"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
