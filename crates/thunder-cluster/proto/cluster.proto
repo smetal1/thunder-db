@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package thunderdb.cluster;
+
+// ClusterService handles all inter-node communication for clustering
+service ClusterService {
+    // One-way message sending (fire and forget)
+    rpc SendMessage(ClusterMessage) returns (Empty);
+
+    // Request-response communication
+    rpc SendRequest(ClusterMessage) returns (ClusterMessage);
+
+    // Gossip protocol exchange
+    rpc Gossip(GossipRequest) returns (GossipResponse);
+
+    // Join cluster request (new node joining)
+    rpc JoinCluster(JoinRequest) returns (JoinResponse);
+
+    // Leave cluster notification
+    rpc LeaveCluster(LeaveRequest) returns (LeaveResponse);
+
+    // Health check
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+message Empty {}
+
+// Generic cluster message wrapper
+message ClusterMessage {
+    uint64 from_node = 1;
+    uint64 to_node = 2;
+    string cluster_name = 3;
+
+    oneof payload {
+        RaftMessageProto raft = 4;
+        GossipMessageProto gossip = 5;
+        ReplicationMessageProto replication = 6;
+    }
+}
+
+// Raft consensus messages
+message RaftMessageProto {
+    uint64 region_id = 1;
+    uint64 term = 2;
+    RaftMessageType msg_type = 3;
+    bytes payload = 4;
+}
+
+enum RaftMessageType {
+    RAFT_UNKNOWN = 0;
+    RAFT_REQUEST_VOTE = 1;
+    RAFT_REQUEST_VOTE_RESPONSE = 2;
+    RAFT_APPEND_ENTRIES = 3;
+    RAFT_APPEND_ENTRIES_RESPONSE = 4;
+    RAFT_HEARTBEAT = 5;
+    RAFT_HEARTBEAT_RESPONSE = 6;
+    RAFT_SNAPSHOT = 7;
+}
+
+// Gossip protocol messages
+message GossipMessageProto {
+    oneof message {
+        GossipSyn syn = 1;
+        GossipAck ack = 2;
+        GossipAck2 ack2 = 3;
+    }
+}
+
+message GossipSyn {
+    uint64 from_node = 1;
+    string from_addr = 2;
+    string cluster_name = 3;
+    GossipDigestProto digest = 4;
+}
+
+message GossipAck {
+    uint64 from_node = 1;
+    GossipDigestProto digest = 2;
+    repeated EndpointStateProto updates = 3;
+}
+
+message GossipAck2 {
+    uint64 from_node = 1;
+    repeated EndpointStateProto updates = 2;
+}
+
+message GossipDigestProto {
+    repeated GossipDigestEntry entries = 1;
+}
+
+message GossipDigestEntry {
+    uint64 node_id = 1;
+    uint64 generation = 2;
+    uint64 max_version = 3;
+}
+
+message EndpointStateProto {
+    uint64 node_id = 1;
+    string addr = 2;
+    uint64 generation = 3;
+    uint64 version = 4;
+    bool is_alive = 5;
+    map<string, VersionedValueProto> app_states = 6;
+}
+
+message VersionedValueProto {
+    bytes value = 1;
+    uint64 version = 2;
+}
+
+// Gossip request/response for the RPC
+message GossipRequest {
+    GossipMessageProto message = 1;
+}
+
+message GossipResponse {
+    GossipMessageProto message = 1;
+}
+
+// Replication messages
+message ReplicationMessageProto {
+    uint64 region_id = 1;
+    ReplicationType msg_type = 2;
+    bytes payload = 3;
+}
+
+enum ReplicationType {
+    REPLICATION_UNKNOWN = 0;
+    REPLICATION_WAL_ENTRY = 1;
+    REPLICATION_SNAPSHOT = 2;
+    REPLICATION_ACK = 3;
+}
+
+// Join cluster
+message JoinRequest {
+    uint64 node_id = 1;
+    string addr = 2;
+    string cluster_name = 3;
+    map<string, string> labels = 4;
+}
+
+message JoinResponse {
+    bool success = 1;
+    string error_message = 2;
+    uint64 leader_id = 3;
+    string leader_addr = 4;
+    repeated NodeInfoProto nodes = 5;
+}
+
+// Leave cluster
+message LeaveRequest {
+    uint64 node_id = 1;
+    bool graceful = 2;
+}
+
+message LeaveResponse {
+    bool success = 1;
+    string error_message = 2;
+}
+
+// Health check
+message HealthRequest {
+    uint64 from_node = 1;
+}
+
+message HealthResponse {
+    bool healthy = 1;
+    NodeStatus status = 2;
+    uint64 region_count = 3;
+    uint64 storage_used = 4;
+    uint64 storage_capacity = 5;
+    float cpu_utilization = 6;
+    float memory_utilization = 7;
+}
+
+message NodeInfoProto {
+    uint64 id = 1;
+    string addr = 2;
+    NodeStatus status = 3;
+    uint64 region_count = 4;
+}
+
+enum NodeStatus {
+    NODE_STATUS_UNKNOWN = 0;
+    NODE_STATUS_ONLINE = 1;
+    NODE_STATUS_OFFLINE = 2;
+    NODE_STATUS_JOINING = 3;
+    NODE_STATUS_LEAVING = 4;
+}

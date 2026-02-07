@@ -5,8 +5,11 @@
 //! - Region-based sharding
 //! - Automatic rebalancing
 //! - Distributed transaction coordination
+//! - Gossip-based peer discovery (Cassandra-style)
 
 pub mod coordinator;
+pub mod generated;
+pub mod gossip;
 pub mod membership;
 pub mod raft_node;
 pub mod region;
@@ -40,8 +43,15 @@ pub use region::{
 
 // Re-exports from transport
 pub use transport::{
-    ConnectionState, GrpcTransport, InMemoryTransport, MessageBatch, MessageRouter,
-    NetworkTransport, PeerConnection, TransportConfig,
+    ClusterServer, ClusterTransport, ConnectionState, GrpcTransport, InMemoryTransport,
+    MessageBatch, MessageRouter, NetworkTransport, PeerConnection, TransportConfig,
+};
+
+// Re-exports from gossip
+pub use gossip::{
+    AppStateKey, EndpointState, EndpointStateUpdate, GossipConfig, GossipDigest,
+    GossipDigestEntry, GossipEvent, GossipMessage, Gossiper, HeartbeatState,
+    PhiAccrualDetector, VersionedValue,
 };
 
 // Re-exports from replication

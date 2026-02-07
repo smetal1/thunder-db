@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 use thunder_common::prelude::*;
 
+use crate::gossip::{GossipConfig, GossipEvent, Gossiper};
 use crate::membership::{HealthStatus, Membership, MembershipConfig, MembershipEvent, NodeMeta};
 use crate::raft_node::{MemoryStorage, RaftNode, RaftNodeConfig};
 use crate::region::{Peer, Region, RegionAction, RegionConfig, RegionManager, RegionMeta, RegionState};
@@ -28,6 +29,10 @@ pub struct CoordinatorConfig {
     pub node_id: NodeId,
     /// This node's address
     pub addr: SocketAddr,
+    /// Cluster name for gossip validation
+    pub cluster_name: String,
+    /// Seed nodes for gossip bootstrap
+    pub seeds: Vec<SocketAddr>,
     /// Raft tick interval
     pub tick_interval: Duration,
     /// Region check interval
@@ -44,6 +49,8 @@ pub struct CoordinatorConfig {
     pub transport_config: TransportConfig,
     /// Membership configuration
     pub membership_config: MembershipConfig,
+    /// Gossip configuration
+    pub gossip_config: GossipConfig,
 }
 
 impl Default for CoordinatorConfig {
@@ -51,6 +58,8 @@ impl Default for CoordinatorConfig {
         Self {
             node_id: NodeId(1),
             addr: "127.0.0.1:5000".parse().unwrap(),
+            cluster_name: "thunderdb".to_string(),
+            seeds: Vec::new(),
             tick_interval: Duration::from_millis(100),
             region_check_interval: Duration::from_secs(60),
             rebalance_interval: Duration::from_secs(300),
@@ -59,6 +68,7 @@ impl Default for CoordinatorConfig {
             region_config: RegionConfig::default(),
             transport_config: TransportConfig::default(),
             membership_config: MembershipConfig::default(),
+            gossip_config: GossipConfig::default(),
         }
     }
 }
@@ -113,6 +123,8 @@ pub struct ClusterCoordinator {
     region_manager: Arc<RegionManager>,
     /// Network transport
     transport: Arc<dyn NetworkTransport>,
+    /// Gossiper for peer discovery
+    gossiper: Option<Arc<Gossiper>>,
     /// Pending operations
     pending_ops: DashMap<u64, PendingOperation>,
     /// Next operation ID
@@ -140,17 +152,37 @@ impl ClusterCoordinator {
             config.region_config.clone(),
         ));
 
+        // Create gossiper if clustering is enabled (seeds provided or is seed)
+        let gossiper = if !config.seeds.is_empty() || config.gossip_config.is_seed {
+            Some(Gossiper::new(
+                config.node_id,
+                config.addr,
+                config.cluster_name.clone(),
+                config.seeds.clone(),
+                membership.clone(),
+                config.gossip_config.clone(),
+            ))
+        } else {
+            None
+        };
+
         Self {
             config,
             state: RwLock::new(ClusterState::Initializing),
             membership,
             region_manager,
             transport,
+            gossiper,
             pending_ops: DashMap::new(),
             next_op_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
             task_handles: AsyncMutex::new(Vec::new()),
         }
+    }
+
+    /// Get the gossiper
+    pub fn gossiper(&self) -> Option<&Arc<Gossiper>> {
+        self.gossiper.as_ref()
     }
 
     /// Get the node ID
@@ -163,15 +195,46 @@ impl ClusterCoordinator {
         *self.state.read()
     }
 
-    /// Bootstrap a new cluster (single node)
+    /// Bootstrap a new cluster (single node) or join via gossip
     pub async fn bootstrap(&self) -> Result<()> {
         *self.state.write() = ClusterState::Bootstrapping;
 
-        // Create initial region covering all keys
+        // If gossiper is present, try to bootstrap via gossip first
+        if let Some(gossiper) = &self.gossiper {
+            tracing::info!("Bootstrapping cluster via gossip protocol");
+
+            if let Err(e) = gossiper.bootstrap().await {
+                tracing::warn!("Gossip bootstrap failed: {}, proceeding as new cluster", e);
+            }
+
+            // Check if we discovered any nodes
+            let discovered = gossiper.discovered_nodes();
+            if !discovered.is_empty() {
+                tracing::info!(
+                    "Discovered {} nodes via gossip, joining cluster",
+                    discovered.len()
+                );
+
+                // Register discovered nodes with transport
+                for (node_id, addr) in &discovered {
+                    self.transport.register(*node_id, *addr).await?;
+                }
+
+                *self.state.write() = ClusterState::Joining;
+
+                // Mark ourselves online
+                self.membership.mark_online();
+
+                *self.state.write() = ClusterState::Running;
+                return Ok(());
+            }
+        }
+
+        // No peers found - bootstrap as new single-node cluster
         let peers = vec![Peer::new(self.config.node_id.0, self.config.node_id)];
         let region_id = self.region_manager.bootstrap(peers)?;
 
-        tracing::info!("Bootstrapped cluster with region {:?}", region_id);
+        tracing::info!("Bootstrapped new cluster with region {:?}", region_id);
 
         // Mark node as online
         self.membership.mark_online();
@@ -180,8 +243,42 @@ impl ClusterCoordinator {
         Ok(())
     }
 
-    /// Join an existing cluster
-    pub async fn join(&self, seed_addr: SocketAddr) -> Result<()> {
+    /// Join an existing cluster via gossip
+    pub async fn join(&self) -> Result<()> {
+        *self.state.write() = ClusterState::Joining;
+
+        // Use gossip to discover and join
+        if let Some(gossiper) = &self.gossiper {
+            gossiper.bootstrap().await?;
+
+            let discovered = gossiper.discovered_nodes();
+            if discovered.is_empty() {
+                *self.state.write() = ClusterState::Initializing;
+                return Err(Error::Internal(
+                    "No cluster nodes discovered via gossip".to_string(),
+                ));
+            }
+
+            // Register discovered nodes
+            for (node_id, addr) in &discovered {
+                self.transport.register(*node_id, *addr).await?;
+            }
+
+            tracing::info!("Joined cluster with {} nodes via gossip", discovered.len());
+        } else {
+            *self.state.write() = ClusterState::Initializing;
+            return Err(Error::Internal(
+                "Cannot join cluster: gossip not configured".to_string(),
+            ));
+        }
+
+        self.membership.mark_online();
+        *self.state.write() = ClusterState::Running;
+        Ok(())
+    }
+
+    /// Join an existing cluster by contacting a specific seed address
+    pub async fn join_with_seed(&self, seed_addr: SocketAddr) -> Result<()> {
         *self.state.write() = ClusterState::Joining;
 
         // Register the seed node with a temporary ID for initial contact
@@ -229,6 +326,33 @@ impl ClusterCoordinator {
     pub async fn start(&self) -> Result<()> {
         let mut handles = self.task_handles.lock().await;
 
+        // Start gossiper if present
+        if let Some(gossiper) = &self.gossiper {
+            let gossiper_clone = gossiper.clone();
+            handles.push(tokio::spawn(async move {
+                if let Err(e) = gossiper_clone.run().await {
+                    tracing::error!("Gossiper stopped with error: {}", e);
+                }
+            }));
+
+            // Start gossip event handler
+            let coordinator = self.clone_ref();
+            let mut gossip_rx = gossiper.subscribe();
+            handles.push(tokio::spawn(async move {
+                loop {
+                    match gossip_rx.recv().await {
+                        Ok(event) => {
+                            coordinator.handle_gossip_event(event).await;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }));
+
+            tracing::info!("Started gossip protocol");
+        }
+
         // Start tick task
         let coordinator = self.clone_ref();
         handles.push(tokio::spawn(async move {
@@ -256,10 +380,91 @@ impl ClusterCoordinator {
         Ok(())
     }
 
+    /// Handle gossip events
+    async fn handle_gossip_event(&self, event: GossipEvent) {
+        match event {
+            GossipEvent::NodeDiscovered(node_id, addr) => {
+                tracing::info!("Gossip: discovered node {:?} at {}", node_id, addr);
+
+                // Register with transport
+                if let Err(e) = self.transport.register(node_id, addr).await {
+                    tracing::warn!("Failed to register discovered node: {}", e);
+                }
+
+                // Trigger rebalance check if we're running
+                if self.cluster_state() == ClusterState::Running {
+                    self.trigger_rebalance_check().await;
+                }
+            }
+            GossipEvent::NodeAlive(node_id) => {
+                tracing::info!("Gossip: node {:?} is now alive", node_id);
+
+                // Update membership
+                let _ = self.membership.update_status(node_id, NodeStatus::Online);
+            }
+            GossipEvent::NodeDead(node_id) => {
+                tracing::warn!("Gossip: node {:?} is now dead", node_id);
+
+                // Handle as failure
+                if let Err(e) = self.handle_node_failure(node_id).await {
+                    tracing::error!("Failed to handle dead node {:?}: {}", node_id, e);
+                }
+            }
+            GossipEvent::StateUpdated(node_id) => {
+                tracing::debug!("Gossip: state updated for node {:?}", node_id);
+            }
+        }
+    }
+
+    /// Trigger a rebalance check
+    async fn trigger_rebalance_check(&self) {
+        let nodes = self.membership.node_infos();
+        let regions = self.region_manager.region_infos();
+        let scheduler = Scheduler::new(
+            self.config.target_replicas,
+            self.config.max_regions_per_node,
+        );
+
+        let node_metas: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.status == NodeStatus::Online)
+            .map(|n| {
+                let mut meta = NodeMeta::new(n.id, self.config.addr);
+                meta.status = n.status;
+                meta
+            })
+            .collect();
+
+        if scheduler.needs_rebalance(&node_metas, &regions) {
+            tracing::info!("Triggering rebalance after topology change");
+            let moves = scheduler.generate_moves(&node_metas, &regions);
+            for mv in moves {
+                tracing::info!(
+                    "Rebalance: moving region {:?} from {:?} to {:?}",
+                    mv.region_id, mv.from, mv.to
+                );
+
+                let new_peer = Peer::new(
+                    self.next_op_id.fetch_add(1, Ordering::SeqCst),
+                    mv.to,
+                );
+
+                if let Err(e) = self.add_peer_to_region(mv.region_id, new_peer).await {
+                    tracing::error!("Failed to add peer during rebalance: {}", e);
+                }
+            }
+        }
+    }
+
     /// Stop the coordinator
     pub async fn stop(&self) -> Result<()> {
         *self.state.write() = ClusterState::ShuttingDown;
         self.shutdown.store(true, Ordering::SeqCst);
+
+        // Shutdown gossiper
+        if let Some(gossiper) = &self.gossiper {
+            gossiper.shutdown();
+        }
 
         // Cancel all background tasks
         let mut handles = self.task_handles.lock().await;
@@ -283,6 +488,7 @@ impl ClusterCoordinator {
             membership: self.membership.clone(),
             region_manager: self.region_manager.clone(),
             transport: self.transport.clone(),
+            gossiper: self.gossiper.clone(),
             pending_ops: DashMap::new(),
             next_op_id: AtomicU64::new(self.next_op_id.load(Ordering::SeqCst)),
             shutdown: AtomicBool::new(self.shutdown.load(Ordering::SeqCst)),

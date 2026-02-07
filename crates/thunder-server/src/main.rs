@@ -2,12 +2,17 @@
 //!
 //! Main entry point for the ThunderDB database server.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use thunder_api::AppState;
+use thunder_cluster::{
+    ClusterCoordinator, CoordinatorConfig, GossipConfig, GrpcTransport, TransportConfig,
+};
 use thunder_common::config::ServerConfig;
+use thunder_common::prelude::NodeId;
 use thunder_server::{DatabaseEngine, EngineConfig, WorkerConfig, WorkerManager};
 use tracing::info;
 use tracing_subscriber::prelude::*;
@@ -250,6 +255,87 @@ async fn main() -> anyhow::Result<()> {
     let worker_manager = Arc::new(WorkerManager::new(engine.clone(), worker_config));
     let _worker_handles = worker_manager.start();
 
+    // Initialize cluster if peers or seeds are configured
+    let cluster_coordinator: Option<Arc<ClusterCoordinator>> =
+        if !config.cluster.peers.is_empty() || !config.cluster.seeds.is_empty() || config.cluster.is_seed {
+            info!("Initializing cluster mode...");
+            info!("Cluster name: {}", config.cluster.cluster_name);
+
+            let grpc_addr: SocketAddr = format!("{}:{}", config.listen_addr, config.grpc_port)
+                .parse()
+                .expect("Invalid gRPC address");
+
+            // Parse seed addresses
+            let seeds: Vec<SocketAddr> = config
+                .cluster
+                .seeds
+                .iter()
+                .chain(config.cluster.peers.iter()) // Also include peers as potential seeds
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
+            info!("gRPC address: {}", grpc_addr);
+            info!("Seeds: {:?}", seeds);
+
+            // Create transport
+            let transport = Arc::new(GrpcTransport::new(
+                NodeId(config.node_id),
+                TransportConfig::default(),
+            ));
+
+            // Create coordinator config
+            let coordinator_config = CoordinatorConfig {
+                node_id: NodeId(config.node_id),
+                addr: grpc_addr,
+                cluster_name: config.cluster.cluster_name.clone(),
+                seeds: seeds.clone(),
+                gossip_config: GossipConfig {
+                    gossip_interval: config.cluster.gossip_interval,
+                    phi_threshold: config.cluster.phi_threshold,
+                    is_seed: config.cluster.is_seed,
+                    ..GossipConfig::default()
+                },
+                target_replicas: config.cluster.replication_factor,
+                ..CoordinatorConfig::default()
+            };
+
+            let coordinator = Arc::new(ClusterCoordinator::new(coordinator_config, transport));
+
+            // Bootstrap or join the cluster
+            match coordinator.bootstrap().await {
+                Ok(()) => {
+                    info!("Cluster bootstrap/join successful");
+
+                    // Start coordinator background tasks
+                    if let Err(e) = coordinator.start().await {
+                        tracing::error!("Failed to start cluster coordinator: {}", e);
+                    } else {
+                        info!("Cluster coordinator started");
+
+                        // Log discovered nodes if using gossip
+                        if let Some(gossiper) = coordinator.gossiper() {
+                            let nodes = gossiper.discovered_nodes();
+                            if !nodes.is_empty() {
+                                info!("Discovered {} cluster nodes via gossip:", nodes.len());
+                                for (node_id, addr) in &nodes {
+                                    info!("  - Node {:?} at {}", node_id, addr);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to bootstrap cluster: {}", e);
+                    tracing::warn!("Continuing in standalone mode");
+                }
+            }
+
+            Some(coordinator)
+        } else {
+            info!("Running in standalone mode (no cluster configured)");
+            None
+        };
+
     // Build addresses
     let pg_addr = format!("{}:{}", config.listen_addr, config.pg_port);
     let mysql_addr = format!("{}:{}", config.listen_addr, config.mysql_port);
@@ -374,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
     let engine_shutdown = engine.clone();
     let worker_manager_shutdown = worker_manager.clone();
+    let cluster_shutdown = cluster_coordinator.clone();
 
     tokio::spawn(async move {
         let ctrl_c = async {
@@ -400,6 +487,14 @@ async fn main() -> anyhow::Result<()> {
         protocol_cancel.cancel();
         // Brief pause to let in-flight connections finish
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Shutdown cluster coordinator
+        if let Some(coordinator) = cluster_shutdown {
+            info!("Shutting down cluster coordinator...");
+            if let Err(e) = coordinator.stop().await {
+                tracing::error!("Error during cluster shutdown: {}", e);
+            }
+        }
 
         // Shutdown background workers (they'll write final checkpoint)
         worker_manager_shutdown.shutdown().await;
@@ -518,6 +613,30 @@ fn load_config(args: &Args) -> anyhow::Result<ServerConfig> {
     if let Ok(val) = std::env::var("THUNDERDB_AUTH_ENABLED") {
         if let Ok(enabled) = val.parse() {
             config.security.authentication_enabled = enabled;
+        }
+    }
+
+    // Cluster configuration overrides
+    if let Ok(val) = std::env::var("THUNDERDB_NODE_ID") {
+        if let Ok(id) = val.parse() {
+            config.node_id = id;
+        }
+    }
+    if let Ok(val) = std::env::var("THUNDERDB_CLUSTER_NAME") {
+        config.cluster.cluster_name = val;
+    }
+    if let Ok(val) = std::env::var("THUNDERDB_SEEDS") {
+        // Comma-separated list of seed addresses
+        config.cluster.seeds = val.split(',').map(|s| s.trim().to_string()).collect();
+    }
+    if let Ok(val) = std::env::var("THUNDERDB_IS_SEED") {
+        if let Ok(is_seed) = val.parse() {
+            config.cluster.is_seed = is_seed;
+        }
+    }
+    if let Ok(val) = std::env::var("THUNDERDB_GRPC_PORT") {
+        if let Ok(port) = val.parse() {
+            config.grpc_port = port;
         }
     }
 

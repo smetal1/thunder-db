@@ -330,11 +330,27 @@ pub enum CompressionAlgorithm {
 /// Cluster configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterConfig {
-    /// Cluster name
+    /// Cluster name (must match across all nodes)
     pub cluster_name: String,
 
-    /// List of peer addresses
+    /// List of peer addresses (deprecated - use seeds for auto-discovery)
     pub peers: Vec<String>,
+
+    /// Seed nodes for gossip-based auto-discovery (e.g., ["10.0.0.1:9090", "10.0.0.2:9090"])
+    #[serde(default)]
+    pub seeds: Vec<String>,
+
+    /// Whether this node is a seed node (can bootstrap alone if no other seeds available)
+    #[serde(default)]
+    pub is_seed: bool,
+
+    /// Gossip interval for peer discovery and failure detection
+    #[serde(default = "default_gossip_interval", with = "humantime_serde")]
+    pub gossip_interval: Duration,
+
+    /// Phi threshold for failure detection (higher = more lenient, typically 8.0)
+    #[serde(default = "default_phi_threshold")]
+    pub phi_threshold: f64,
 
     /// Raft election timeout
     #[serde(with = "humantime_serde")]
@@ -357,11 +373,23 @@ pub struct ClusterConfig {
     pub auto_balance: bool,
 }
 
+fn default_gossip_interval() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_phi_threshold() -> f64 {
+    8.0
+}
+
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
             cluster_name: "thunderdb".to_string(),
             peers: vec![],
+            seeds: vec![],
+            is_seed: false,
+            gossip_interval: default_gossip_interval(),
+            phi_threshold: default_phi_threshold(),
             raft_election_timeout: Duration::from_millis(1000),
             raft_heartbeat_interval: Duration::from_millis(100),
             replication_factor: 3,

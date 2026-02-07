@@ -548,6 +548,521 @@ impl MessageRouter {
     }
 }
 
+/// Unified cluster transport with gRPC client and server
+/// Handles both Raft messages and Gossip protocol
+pub struct ClusterTransport {
+    /// This node's ID
+    node_id: NodeId,
+    /// This node's listen address
+    listen_addr: SocketAddr,
+    /// Cluster name for validation
+    cluster_name: String,
+    /// Configuration
+    config: TransportConfig,
+    /// gRPC client connections (lazy-initialized)
+    clients: DashMap<SocketAddr, tonic::transport::Channel>,
+    /// Address registry (node_id -> address)
+    addresses: DashMap<NodeId, SocketAddr>,
+    /// Peer connections state
+    peers: DashMap<NodeId, PeerConnection>,
+    /// Incoming Raft message receiver
+    raft_receiver: TokioMutex<Option<mpsc::Receiver<RaftMessage>>>,
+    /// Raft message sender (for server to inject received messages)
+    raft_sender: mpsc::Sender<RaftMessage>,
+    /// Incoming gossip message sender (for server to inject)
+    gossip_sender: Option<mpsc::Sender<(SocketAddr, crate::gossip::GossipMessage)>>,
+    /// Shutdown flag
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ClusterTransport {
+    /// Create a new cluster transport
+    pub fn new(
+        node_id: NodeId,
+        listen_addr: SocketAddr,
+        cluster_name: String,
+        config: TransportConfig,
+    ) -> Self {
+        let (raft_sender, raft_receiver) = mpsc::channel(10000);
+
+        Self {
+            node_id,
+            listen_addr,
+            cluster_name,
+            config,
+            clients: DashMap::new(),
+            addresses: DashMap::new(),
+            peers: DashMap::new(),
+            raft_receiver: TokioMutex::new(Some(raft_receiver)),
+            raft_sender,
+            gossip_sender: None,
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Set the gossip message sender (called by Gossiper to receive gossip messages)
+    pub fn set_gossip_sender(
+        &mut self,
+        sender: mpsc::Sender<(SocketAddr, crate::gossip::GossipMessage)>,
+    ) {
+        self.gossip_sender = Some(sender);
+    }
+
+    /// Get or create a gRPC channel to an address
+    async fn get_channel(&self, addr: SocketAddr) -> Result<tonic::transport::Channel> {
+        if let Some(channel) = self.clients.get(&addr) {
+            return Ok(channel.clone());
+        }
+
+        // Create new channel
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", addr))
+            .map_err(|e| Error::Internal(format!("Invalid endpoint: {}", e)))?
+            .connect_timeout(self.config.connect_timeout)
+            .timeout(self.config.request_timeout)
+            .tcp_keepalive(Some(self.config.keepalive_interval));
+
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to connect to {}: {}", addr, e)))?;
+
+        self.clients.insert(addr, channel.clone());
+        Ok(channel)
+    }
+
+    /// Send a gossip message to an address and get a response
+    pub async fn send_gossip(
+        &self,
+        addr: SocketAddr,
+        msg: crate::gossip::GossipMessage,
+    ) -> Result<crate::gossip::GossipMessage> {
+        let channel = self.get_channel(addr).await?;
+
+        // Convert to proto format
+        let proto_msg = self.gossip_to_proto(&msg);
+        let request = crate::generated::GossipRequest {
+            message: Some(proto_msg),
+        };
+
+        // Make gRPC call
+        let mut client = crate::generated::cluster_service_client::ClusterServiceClient::new(channel);
+        let response = client
+            .gossip(request)
+            .await
+            .map_err(|e| Error::Internal(format!("Gossip RPC failed: {}", e)))?;
+
+        // Convert response back
+        let response_msg = response.into_inner();
+        self.proto_to_gossip(response_msg.message.ok_or_else(|| {
+            Error::Internal("Empty gossip response".to_string())
+        })?)
+    }
+
+    /// Convert gossip message to proto
+    fn gossip_to_proto(
+        &self,
+        msg: &crate::gossip::GossipMessage,
+    ) -> crate::generated::GossipMessageProto {
+        use crate::generated::*;
+
+        let message = match msg {
+            crate::gossip::GossipMessage::Syn {
+                from,
+                from_addr,
+                cluster_name,
+                digest,
+            } => gossip_message_proto::Message::Syn(GossipSyn {
+                from_node: from.0,
+                from_addr: from_addr.to_string(),
+                cluster_name: cluster_name.clone(),
+                digest: Some(self.digest_to_proto(digest)),
+            }),
+
+            crate::gossip::GossipMessage::Ack {
+                from,
+                digest,
+                updates,
+            } => gossip_message_proto::Message::Ack(GossipAck {
+                from_node: from.0,
+                digest: Some(self.digest_to_proto(digest)),
+                updates: updates.iter().map(|u| self.endpoint_to_proto(&u.endpoint)).collect(),
+            }),
+
+            crate::gossip::GossipMessage::Ack2 { from, updates } => {
+                gossip_message_proto::Message::Ack2(GossipAck2 {
+                    from_node: from.0,
+                    updates: updates.iter().map(|u| self.endpoint_to_proto(&u.endpoint)).collect(),
+                })
+            }
+        };
+
+        GossipMessageProto {
+            message: Some(message),
+        }
+    }
+
+    /// Convert proto to gossip message
+    fn proto_to_gossip(
+        &self,
+        proto: crate::generated::GossipMessageProto,
+    ) -> Result<crate::gossip::GossipMessage> {
+        use crate::generated::gossip_message_proto::Message;
+
+        let msg = proto.message.ok_or_else(|| {
+            Error::Internal("Missing gossip message".to_string())
+        })?;
+
+        Ok(match msg {
+            Message::Syn(syn) => crate::gossip::GossipMessage::Syn {
+                from: NodeId(syn.from_node),
+                from_addr: syn.from_addr.parse().map_err(|e| {
+                    Error::Internal(format!("Invalid address: {}", e))
+                })?,
+                cluster_name: syn.cluster_name,
+                digest: self.proto_to_digest(syn.digest.unwrap_or_default()),
+            },
+
+            Message::Ack(ack) => crate::gossip::GossipMessage::Ack {
+                from: NodeId(ack.from_node),
+                digest: self.proto_to_digest(ack.digest.unwrap_or_default()),
+                updates: ack.updates.into_iter().map(|u| {
+                    crate::gossip::EndpointStateUpdate {
+                        endpoint: self.proto_to_endpoint(u),
+                    }
+                }).collect(),
+            },
+
+            Message::Ack2(ack2) => crate::gossip::GossipMessage::Ack2 {
+                from: NodeId(ack2.from_node),
+                updates: ack2.updates.into_iter().map(|u| {
+                    crate::gossip::EndpointStateUpdate {
+                        endpoint: self.proto_to_endpoint(u),
+                    }
+                }).collect(),
+            },
+        })
+    }
+
+    fn digest_to_proto(
+        &self,
+        digest: &crate::gossip::GossipDigest,
+    ) -> crate::generated::GossipDigestProto {
+        crate::generated::GossipDigestProto {
+            entries: digest.entries.iter().map(|e| {
+                crate::generated::GossipDigestEntry {
+                    node_id: e.node_id.0,
+                    generation: e.generation,
+                    max_version: e.max_version,
+                }
+            }).collect(),
+        }
+    }
+
+    fn proto_to_digest(
+        &self,
+        proto: crate::generated::GossipDigestProto,
+    ) -> crate::gossip::GossipDigest {
+        crate::gossip::GossipDigest {
+            entries: proto.entries.into_iter().map(|e| {
+                crate::gossip::GossipDigestEntry {
+                    node_id: NodeId(e.node_id),
+                    generation: e.generation,
+                    max_version: e.max_version,
+                }
+            }).collect(),
+        }
+    }
+
+    fn endpoint_to_proto(
+        &self,
+        ep: &crate::gossip::EndpointState,
+    ) -> crate::generated::EndpointStateProto {
+        use std::sync::atomic::Ordering;
+
+        crate::generated::EndpointStateProto {
+            node_id: ep.node_id.0,
+            addr: ep.addr.to_string(),
+            generation: ep.heartbeat.generation,
+            version: ep.heartbeat.version.load(Ordering::SeqCst),
+            is_alive: ep.is_alive,
+            app_states: ep.app_states.iter().map(|(k, v)| {
+                let key = match k {
+                    crate::gossip::AppStateKey::Status => "status".to_string(),
+                    crate::gossip::AppStateKey::Load => "load".to_string(),
+                    crate::gossip::AppStateKey::Regions => "regions".to_string(),
+                    crate::gossip::AppStateKey::Schema => "schema".to_string(),
+                    crate::gossip::AppStateKey::Custom(s) => format!("custom:{}", s),
+                };
+                (key, crate::generated::VersionedValueProto {
+                    value: v.value.clone(),
+                    version: v.version,
+                })
+            }).collect(),
+        }
+    }
+
+    fn proto_to_endpoint(
+        &self,
+        proto: crate::generated::EndpointStateProto,
+    ) -> crate::gossip::EndpointState {
+        use std::sync::atomic::AtomicU64;
+
+        let addr: SocketAddr = proto.addr.parse().unwrap_or_else(|_| {
+            "0.0.0.0:0".parse().unwrap()
+        });
+
+        let heartbeat = crate::gossip::HeartbeatState {
+            generation: proto.generation,
+            version: AtomicU64::new(proto.version),
+        };
+
+        let app_states = proto.app_states.into_iter().map(|(k, v)| {
+            let key = if k == "status" {
+                crate::gossip::AppStateKey::Status
+            } else if k == "load" {
+                crate::gossip::AppStateKey::Load
+            } else if k == "regions" {
+                crate::gossip::AppStateKey::Regions
+            } else if k == "schema" {
+                crate::gossip::AppStateKey::Schema
+            } else if let Some(custom) = k.strip_prefix("custom:") {
+                crate::gossip::AppStateKey::Custom(custom.to_string())
+            } else {
+                crate::gossip::AppStateKey::Custom(k)
+            };
+            (key, crate::gossip::VersionedValue {
+                value: v.value,
+                version: v.version,
+            })
+        }).collect();
+
+        crate::gossip::EndpointState {
+            node_id: NodeId(proto.node_id),
+            addr,
+            heartbeat,
+            app_states,
+            updated_at: Some(std::time::Instant::now()),
+            is_alive: proto.is_alive,
+        }
+    }
+
+    /// Get the Raft message sender (for the gRPC server to inject received messages)
+    pub fn get_raft_sender(&self) -> mpsc::Sender<RaftMessage> {
+        self.raft_sender.clone()
+    }
+
+    /// Update peer state after successful communication
+    fn mark_peer_success(&self, node_id: NodeId) {
+        if let Some(mut peer) = self.peers.get_mut(&node_id) {
+            peer.mark_connected();
+        }
+    }
+
+    /// Update peer state after failed communication
+    fn mark_peer_failure(&self, node_id: NodeId) {
+        if let Some(mut peer) = self.peers.get_mut(&node_id) {
+            peer.mark_failed();
+        }
+    }
+}
+
+#[async_trait]
+impl NetworkTransport for ClusterTransport {
+    async fn send(&self, to: NodeId, msg: RaftMessage) -> Result<()> {
+        let addr = self.addresses.get(&to).map(|r| *r).ok_or_else(|| {
+            Error::Internal(format!("Address not found for node {:?}", to))
+        })?;
+
+        let channel = self.get_channel(addr).await?;
+
+        // Convert to proto
+        let proto_msg = crate::generated::ClusterMessage {
+            from_node: self.node_id.0,
+            to_node: to.0,
+            cluster_name: self.cluster_name.clone(),
+            payload: Some(crate::generated::cluster_message::Payload::Raft(
+                crate::generated::RaftMessageProto {
+                    region_id: msg.region_id.0,
+                    term: msg.term,
+                    msg_type: match msg.msg_type {
+                        RaftMessageType::RequestVote => crate::generated::RaftMessageType::RaftRequestVote as i32,
+                        RaftMessageType::RequestVoteResponse => crate::generated::RaftMessageType::RaftRequestVoteResponse as i32,
+                        RaftMessageType::AppendEntries => crate::generated::RaftMessageType::RaftAppendEntries as i32,
+                        RaftMessageType::AppendEntriesResponse => crate::generated::RaftMessageType::RaftAppendEntriesResponse as i32,
+                        RaftMessageType::Heartbeat => crate::generated::RaftMessageType::RaftHeartbeat as i32,
+                        RaftMessageType::HeartbeatResponse => crate::generated::RaftMessageType::RaftHeartbeatResponse as i32,
+                        RaftMessageType::Snapshot => crate::generated::RaftMessageType::RaftSnapshot as i32,
+                    },
+                    payload: msg.payload,
+                }
+            )),
+        };
+
+        let mut client = crate::generated::cluster_service_client::ClusterServiceClient::new(channel);
+        client
+            .send_message(proto_msg)
+            .await
+            .map_err(|e| Error::Internal(format!("Send failed: {}", e)))?;
+
+        self.mark_peer_success(to);
+        Ok(())
+    }
+
+    async fn send_and_wait(&self, to: NodeId, msg: RaftMessage) -> Result<RaftMessage> {
+        let addr = self.addresses.get(&to).map(|r| *r).ok_or_else(|| {
+            Error::Internal(format!("Address not found for node {:?}", to))
+        })?;
+
+        let channel = self.get_channel(addr).await?;
+
+        let proto_msg = crate::generated::ClusterMessage {
+            from_node: self.node_id.0,
+            to_node: to.0,
+            cluster_name: self.cluster_name.clone(),
+            payload: Some(crate::generated::cluster_message::Payload::Raft(
+                crate::generated::RaftMessageProto {
+                    region_id: msg.region_id.0,
+                    term: msg.term,
+                    msg_type: match msg.msg_type {
+                        RaftMessageType::RequestVote => crate::generated::RaftMessageType::RaftRequestVote as i32,
+                        RaftMessageType::RequestVoteResponse => crate::generated::RaftMessageType::RaftRequestVoteResponse as i32,
+                        RaftMessageType::AppendEntries => crate::generated::RaftMessageType::RaftAppendEntries as i32,
+                        RaftMessageType::AppendEntriesResponse => crate::generated::RaftMessageType::RaftAppendEntriesResponse as i32,
+                        RaftMessageType::Heartbeat => crate::generated::RaftMessageType::RaftHeartbeat as i32,
+                        RaftMessageType::HeartbeatResponse => crate::generated::RaftMessageType::RaftHeartbeatResponse as i32,
+                        RaftMessageType::Snapshot => crate::generated::RaftMessageType::RaftSnapshot as i32,
+                    },
+                    payload: msg.payload,
+                }
+            )),
+        };
+
+        let mut client = crate::generated::cluster_service_client::ClusterServiceClient::new(channel);
+        let response = client
+            .send_request(proto_msg)
+            .await
+            .map_err(|e| Error::Internal(format!("Request failed: {}", e)))?;
+
+        self.mark_peer_success(to);
+
+        // Convert response back
+        let resp = response.into_inner();
+        if let Some(crate::generated::cluster_message::Payload::Raft(raft)) = resp.payload {
+            Ok(RaftMessage {
+                region_id: RegionId(raft.region_id),
+                from: NodeId(resp.from_node),
+                to: NodeId(resp.to_node),
+                msg_type: match raft.msg_type {
+                    x if x == crate::generated::RaftMessageType::RaftRequestVote as i32 => RaftMessageType::RequestVote,
+                    x if x == crate::generated::RaftMessageType::RaftRequestVoteResponse as i32 => RaftMessageType::RequestVoteResponse,
+                    x if x == crate::generated::RaftMessageType::RaftAppendEntries as i32 => RaftMessageType::AppendEntries,
+                    x if x == crate::generated::RaftMessageType::RaftAppendEntriesResponse as i32 => RaftMessageType::AppendEntriesResponse,
+                    x if x == crate::generated::RaftMessageType::RaftHeartbeat as i32 => RaftMessageType::Heartbeat,
+                    x if x == crate::generated::RaftMessageType::RaftHeartbeatResponse as i32 => RaftMessageType::HeartbeatResponse,
+                    _ => RaftMessageType::Snapshot,
+                },
+                term: raft.term,
+                payload: raft.payload,
+            })
+        } else {
+            Err(Error::Internal("Invalid response payload".to_string()))
+        }
+    }
+
+    async fn broadcast(&self, nodes: &[NodeId], msg: RaftMessage) -> Vec<(NodeId, Result<()>)> {
+        let futures: Vec<_> = nodes
+            .iter()
+            .map(|&node_id| {
+                let msg = msg.clone();
+                async move {
+                    let result = self.send(node_id, msg).await;
+                    (node_id, result)
+                }
+            })
+            .collect();
+
+        futures::future::join_all(futures).await
+    }
+
+    async fn recv(&self) -> Result<RaftMessage> {
+        let mut guard = self.raft_receiver.lock().await;
+        if let Some(ref mut receiver) = *guard {
+            receiver
+                .recv()
+                .await
+                .ok_or_else(|| Error::Internal("Transport closed".to_string()))
+        } else {
+            Err(Error::Internal("Receiver already taken".to_string()))
+        }
+    }
+
+    async fn register(&self, node_id: NodeId, addr: SocketAddr) -> Result<()> {
+        self.addresses.insert(node_id, addr);
+        self.peers.insert(node_id, PeerConnection::new(node_id, addr));
+        Ok(())
+    }
+
+    async fn unregister(&self, node_id: NodeId) -> Result<()> {
+        if let Some((_, addr)) = self.addresses.remove(&node_id) {
+            self.clients.remove(&addr);
+        }
+        self.peers.remove(&node_id);
+        Ok(())
+    }
+
+    fn get_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
+        self.addresses.get(&node_id).map(|r| *r)
+    }
+
+    async fn is_reachable(&self, node_id: NodeId) -> bool {
+        if let Some(peer) = self.peers.get(&node_id) {
+            peer.is_healthy()
+        } else {
+            false
+        }
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.clients.clear();
+        self.peers.clear();
+        Ok(())
+    }
+}
+
+/// gRPC server implementation for cluster service
+pub struct ClusterServer {
+    /// Node ID
+    node_id: NodeId,
+    /// Cluster name
+    cluster_name: String,
+    /// Raft message sender
+    raft_sender: mpsc::Sender<RaftMessage>,
+    /// Gossip message sender
+    gossip_sender: Option<mpsc::Sender<(SocketAddr, crate::gossip::GossipMessage)>>,
+    /// Transport reference for conversions
+    transport: Arc<ClusterTransport>,
+}
+
+impl ClusterServer {
+    pub fn new(
+        node_id: NodeId,
+        cluster_name: String,
+        raft_sender: mpsc::Sender<RaftMessage>,
+        gossip_sender: Option<mpsc::Sender<(SocketAddr, crate::gossip::GossipMessage)>>,
+        transport: Arc<ClusterTransport>,
+    ) -> Self {
+        Self {
+            node_id,
+            cluster_name,
+            raft_sender,
+            gossip_sender,
+            transport,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
