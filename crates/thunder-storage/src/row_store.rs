@@ -107,51 +107,178 @@ impl Snapshot {
     }
 }
 
-/// Free space map for tracking page free space.
+/// Number of buckets for free space map (log2 of max page size)
+const FSM_NUM_BUCKETS: usize = 8;
+
+/// Free space map with bucketed approach for O(1) page finding.
+///
+/// Instead of linear scanning through all pages to find one with enough space,
+/// this implementation uses size-based buckets for O(1) lookups:
+/// - Bucket 0: 0-255 bytes free
+/// - Bucket 1: 256-511 bytes free
+/// - Bucket 2: 512-1023 bytes free
+/// - Bucket 3: 1024-2047 bytes free
+/// - Bucket 4: 2048-4095 bytes free
+/// - Bucket 5: 4096-8191 bytes free
+/// - Bucket 6: 8192-12287 bytes free
+/// - Bucket 7: 12288+ bytes free
 #[derive(Debug, Default)]
 pub struct FreeSpaceMap {
-    /// Page ID to free space bytes mapping
-    entries: DashMap<PageId, u16>,
+    /// Buckets of page IDs by free space range
+    buckets: [dashmap::DashSet<PageId>; FSM_NUM_BUCKETS],
+    /// Exact free space tracking for updates
+    exact: DashMap<PageId, u16>,
 }
 
 impl FreeSpaceMap {
     pub fn new() -> Self {
         Self {
-            entries: DashMap::new(),
+            buckets: Default::default(),
+            exact: DashMap::new(),
+        }
+    }
+
+    /// Get the bucket index for a given free space amount.
+    #[inline]
+    fn bucket_index(free_space: u16) -> usize {
+        match free_space {
+            0..=255 => 0,
+            256..=511 => 1,
+            512..=1023 => 2,
+            1024..=2047 => 3,
+            2048..=4095 => 4,
+            4096..=8191 => 5,
+            8192..=12287 => 6,
+            _ => 7,
+        }
+    }
+
+    /// Minimum free space for each bucket (for finding appropriate bucket).
+    #[inline]
+    fn bucket_min_size(bucket: usize) -> u16 {
+        match bucket {
+            0 => 0,
+            1 => 256,
+            2 => 512,
+            3 => 1024,
+            4 => 2048,
+            5 => 4096,
+            6 => 8192,
+            _ => 12288,
         }
     }
 
     /// Update free space for a page.
     pub fn update(&self, page_id: PageId, free_space: u16) {
-        self.entries.insert(page_id, free_space);
+        let new_bucket = Self::bucket_index(free_space);
+
+        // Check if page was already tracked
+        if let Some(old_entry) = self.exact.get(&page_id) {
+            let old_bucket = Self::bucket_index(*old_entry);
+            if old_bucket != new_bucket {
+                // Move between buckets
+                self.buckets[old_bucket].remove(&page_id);
+                self.buckets[new_bucket].insert(page_id);
+            }
+        } else {
+            // New page
+            self.buckets[new_bucket].insert(page_id);
+        }
+
+        self.exact.insert(page_id, free_space);
     }
 
     /// Find a page with at least `needed` bytes of free space.
+    /// O(1) operation - searches from the appropriate bucket upward.
     pub fn find_page(&self, needed: u16) -> Option<PageId> {
-        self.entries
-            .iter()
-            .find(|entry| *entry.value() >= needed)
-            .map(|entry| *entry.key())
+        let start_bucket = Self::bucket_index(needed);
+
+        // Search from the bucket that can satisfy the request upward
+        for bucket_idx in start_bucket..FSM_NUM_BUCKETS {
+            // Check if bucket has any pages
+            if let Some(page_ref) = self.buckets[bucket_idx].iter().next() {
+                return Some(*page_ref);
+            }
+        }
+
+        // No suitable page found
+        None
     }
 
     /// Remove a page from the FSM.
     pub fn remove(&self, page_id: PageId) {
-        self.entries.remove(&page_id);
+        if let Some((_, old_space)) = self.exact.remove(&page_id) {
+            let bucket = Self::bucket_index(old_space);
+            self.buckets[bucket].remove(&page_id);
+        }
+    }
+
+    /// Get the exact free space for a page, if tracked.
+    pub fn get_free_space(&self, page_id: PageId) -> Option<u16> {
+        self.exact.get(&page_id).map(|e| *e)
     }
 }
 
-/// Row store implementation.
+/// Row locator map for O(1) row lookups.
+///
+/// Maps (TableId, RowId) to physical location (PageId, SlotId).
+/// This eliminates the need to scan pages when looking up a specific row.
+#[derive(Debug, Default)]
+pub struct RowLocator {
+    /// Map from (table_id, row_id) to (page_id, slot_id)
+    locations: DashMap<(TableId, RowId), (PageId, u16)>,
+}
+
+impl RowLocator {
+    pub fn new() -> Self {
+        Self {
+            locations: DashMap::new(),
+        }
+    }
+
+    /// Insert or update a row's location.
+    #[inline]
+    pub fn insert(&self, table_id: TableId, row_id: RowId, page_id: PageId, slot_id: u16) {
+        self.locations.insert((table_id, row_id), (page_id, slot_id));
+    }
+
+    /// Get a row's location.
+    #[inline]
+    pub fn get(&self, table_id: TableId, row_id: RowId) -> Option<(PageId, u16)> {
+        self.locations.get(&(table_id, row_id)).map(|e| *e)
+    }
+
+    /// Remove a row's location.
+    #[inline]
+    pub fn remove(&self, table_id: TableId, row_id: RowId) {
+        self.locations.remove(&(table_id, row_id));
+    }
+
+    /// Get the number of tracked rows.
+    pub fn len(&self) -> usize {
+        self.locations.len()
+    }
+
+    /// Check if the locator is empty.
+    pub fn is_empty(&self) -> bool {
+        self.locations.is_empty()
+    }
+}
+
+/// Row store implementation with O(1) row lookups.
 pub struct RowStoreImpl {
     /// Buffer pool for page access
     buffer_pool: Arc<BufferPoolImpl>,
     /// WAL writer for durability
     wal: Arc<WalWriterImpl>,
-    /// Free space map per table
+    /// Free space map per table (bucketed for O(1) page finding)
     table_fsm: DashMap<TableId, FreeSpaceMap>,
     /// First page ID per table
     table_first_page: DashMap<TableId, PageId>,
     /// Next row ID per table
     next_row_id: DashMap<TableId, AtomicU64>,
+    /// Row locator for O(1) row lookups
+    row_locator: RowLocator,
 }
 
 impl RowStoreImpl {
@@ -163,6 +290,7 @@ impl RowStoreImpl {
             table_fsm: DashMap::new(),
             table_first_page: DashMap::new(),
             next_row_id: DashMap::new(),
+            row_locator: RowLocator::new(),
         }
     }
 
@@ -269,6 +397,9 @@ impl RowStoreImpl {
 
         drop(guard);
 
+        // Register row location for O(1) lookups
+        self.row_locator.insert(table_id, row_id, page_id, slot_id);
+
         // Write WAL record with full InsertRecord format for recovery
         let insert_record = InsertRecord {
             row_id,
@@ -367,6 +498,9 @@ impl RowStoreImpl {
 
             drop(guard);
 
+            // Register row location for O(1) lookups
+            self.row_locator.insert(table_id, row_id, page_id, slot_id);
+
             // Create WAL entry (don't append yet)
             let insert_record = InsertRecord {
                 row_id,
@@ -393,40 +527,46 @@ impl RowStoreImpl {
     }
 
     /// Get a row by ID with visibility check.
+    /// Uses row locator for O(1) lookup instead of page scanning.
     pub async fn get(
         &self,
         table_id: TableId,
         snapshot: &Snapshot,
         row_id: RowId,
     ) -> Result<Option<Row>> {
-        // For simplicity, scan all pages to find the row
-        // In a real implementation, we'd use an index or row ID map
+        // O(1) lookup using row locator
+        if let Some((page_id, slot_id)) = self.row_locator.get(table_id, row_id) {
+            let guard = self.buffer_pool.fetch_page(page_id)?;
+
+            if let Some(tuple_data) = guard.get_tuple(slot_id) {
+                let (header, row) = self.decode_row(tuple_data)?;
+
+                // Check visibility
+                if snapshot.is_visible(TxnId(header.xmin), TxnId(header.xmax)) {
+                    return Ok(Some(row));
+                }
+            }
+        }
+
+        // Fallback to page scan if row locator doesn't have the entry
+        // (e.g., after recovery before locator is rebuilt)
         let first_page_id = match self.table_first_page.get(&table_id) {
             Some(p) => *p,
             None => return Ok(None),
         };
 
-        // Scan pages (simplified - in reality we'd use a row locator)
-        let mut current_page_id = first_page_id;
-        loop {
-            let guard = self.buffer_pool.fetch_page(current_page_id)?;
+        let guard = self.buffer_pool.fetch_page(first_page_id)?;
 
-            // Scan tuples in page
-            for slot_id in 0..guard.slot_count() {
-                if let Some(tuple_data) = guard.get_tuple(slot_id) {
-                    let (header, row) = self.decode_row(tuple_data)?;
+        // Scan tuples in page
+        for slot_id in 0..guard.slot_count() {
+            if let Some(tuple_data) = guard.get_tuple(slot_id) {
+                let (header, row) = self.decode_row(tuple_data)?;
 
-                    // Check visibility
-                    if snapshot.is_visible(TxnId(header.xmin), TxnId(header.xmax)) {
-                        // Check if this is the row we're looking for
-                        // (In a real impl, row_id would be stored in the tuple)
-                        return Ok(Some(row));
-                    }
+                // Check visibility
+                if snapshot.is_visible(TxnId(header.xmin), TxnId(header.xmax)) {
+                    return Ok(Some(row));
                 }
             }
-
-            // Move to next page (simplified - no linked list yet)
-            break;
         }
 
         Ok(None)
@@ -519,30 +659,42 @@ impl RowStoreImpl {
     }
 
     /// Delete a row by setting xmax.
+    /// Uses row locator for O(1) lookup of the row to delete.
     pub async fn delete(
         &self,
         table_id: TableId,
         txn_id: TxnId,
         row_id: RowId,
     ) -> Result<()> {
-        // Find the row and set xmax
-        let first_page_id = match self.table_first_page.get(&table_id) {
-            Some(p) => *p,
-            None => return Err(Error::NotFound("Table".into(), table_id.0.to_string())),
-        };
+        // Try O(1) lookup using row locator
+        if let Some((page_id, slot_id)) = self.row_locator.get(table_id, row_id) {
+            let mut guard = self.buffer_pool.fetch_page_mut(page_id)?;
+            guard.page_mut().set_xmax(slot_id, txn_id)?;
+            drop(guard);
 
-        let mut guard = self.buffer_pool.fetch_page_mut(first_page_id)?;
+            // Note: We don't remove from locator yet because the row is still visible
+            // to transactions that started before the delete. The locator entry will
+            // be removed during vacuum when the row is physically removed.
+        } else {
+            // Fallback to page scan
+            let first_page_id = match self.table_first_page.get(&table_id) {
+                Some(p) => *p,
+                None => return Err(Error::NotFound("Table".into(), table_id.0.to_string())),
+            };
 
-        // Find the tuple (simplified)
-        for slot_id in 0..guard.slot_count() {
-            if let Some(_) = guard.get_tuple(slot_id) {
-                // Set xmax to mark as deleted
-                guard.page_mut().set_xmax(slot_id, txn_id)?;
-                break;
+            let mut guard = self.buffer_pool.fetch_page_mut(first_page_id)?;
+
+            // Find the tuple (simplified)
+            for slot_id in 0..guard.slot_count() {
+                if guard.get_tuple(slot_id).is_some() {
+                    // Set xmax to mark as deleted
+                    guard.page_mut().set_xmax(slot_id, txn_id)?;
+                    break;
+                }
             }
-        }
 
-        drop(guard);
+            drop(guard);
+        }
 
         // Write WAL record
         let wal_entry = WalEntry {

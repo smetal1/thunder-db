@@ -87,7 +87,7 @@ impl Snapshot {
     }
 }
 
-/// MVCC transaction manager statistics.
+/// MVCC transaction manager statistics (snapshot for external use).
 #[derive(Debug, Clone, Default)]
 pub struct MvccStats {
     pub txns_started: u64,
@@ -96,6 +96,41 @@ pub struct MvccStats {
     pub write_conflicts: u64,
     pub reads_performed: u64,
     pub writes_performed: u64,
+}
+
+/// Internal atomic stats for lock-free updates.
+struct AtomicMvccStats {
+    txns_started: AtomicU64,
+    txns_committed: AtomicU64,
+    txns_aborted: AtomicU64,
+    write_conflicts: AtomicU64,
+    reads_performed: AtomicU64,
+    writes_performed: AtomicU64,
+}
+
+impl AtomicMvccStats {
+    fn new() -> Self {
+        Self {
+            txns_started: AtomicU64::new(0),
+            txns_committed: AtomicU64::new(0),
+            txns_aborted: AtomicU64::new(0),
+            write_conflicts: AtomicU64::new(0),
+            reads_performed: AtomicU64::new(0),
+            writes_performed: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a snapshot of current stats.
+    fn snapshot(&self) -> MvccStats {
+        MvccStats {
+            txns_started: self.txns_started.load(Ordering::Relaxed),
+            txns_committed: self.txns_committed.load(Ordering::Relaxed),
+            txns_aborted: self.txns_aborted.load(Ordering::Relaxed),
+            write_conflicts: self.write_conflicts.load(Ordering::Relaxed),
+            reads_performed: self.reads_performed.load(Ordering::Relaxed),
+            writes_performed: self.writes_performed.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// MVCC transaction state.
@@ -140,8 +175,8 @@ pub struct MvccTransactionManager {
     lock_manager: Arc<LockManager>,
     /// Deadlock detector
     deadlock_detector: Arc<WaitForGraph>,
-    /// Statistics
-    stats: Mutex<MvccStats>,
+    /// Statistics (lock-free atomic counters)
+    stats: AtomicMvccStats,
     /// Write sets for conflict detection: (table_id, row_id) -> txn_id
     write_intents: DashMap<(TableId, RowId), TxnId>,
 }
@@ -156,7 +191,7 @@ impl MvccTransactionManager {
             committed_txns: DashMap::new(),
             lock_manager: Arc::new(LockManager::new()),
             deadlock_detector: Arc::new(WaitForGraph::new()),
-            stats: Mutex::new(MvccStats::default()),
+            stats: AtomicMvccStats::new(),
             write_intents: DashMap::new(),
         }
     }
@@ -170,7 +205,7 @@ impl MvccTransactionManager {
             committed_txns: DashMap::new(),
             lock_manager,
             deadlock_detector: Arc::new(WaitForGraph::new()),
-            stats: Mutex::new(MvccStats::default()),
+            stats: AtomicMvccStats::new(),
             write_intents: DashMap::new(),
         }
     }
@@ -246,7 +281,7 @@ impl MvccTransactionManager {
 
     /// Get statistics.
     pub fn stats(&self) -> MvccStats {
-        self.stats.lock().clone()
+        self.stats.snapshot()
     }
 
     /// Get active transaction count.
@@ -278,7 +313,7 @@ impl MvccTransactionManager {
 
         self.active_txns.insert(txn_id, RwLock::new(txn));
         self.deadlock_detector.register_txn(txn_id);
-        self.stats.lock().txns_started += 1;
+        self.stats.txns_started.fetch_add(1, Ordering::Relaxed);
 
         Ok(txn_id)
     }
@@ -314,7 +349,7 @@ impl MvccTransactionManager {
             txn.inner.add_read(table_id, row_id);
         }
 
-        self.stats.lock().reads_performed += 1;
+        self.stats.reads_performed.fetch_add(1, Ordering::Relaxed);
 
         // Note: Actual row fetch would be done by storage layer using the snapshot
         // For now, return None as placeholder
@@ -334,7 +369,7 @@ impl MvccTransactionManager {
 
         // Check for write-write conflict
         if let Some(conflicting_txn) = self.check_write_conflict(txn_id, table_id, row_id) {
-            self.stats.lock().write_conflicts += 1;
+            self.stats.write_conflicts.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Transaction(TransactionError::WriteConflict(format!(
                 "Write conflict with transaction {:?}",
                 conflicting_txn
@@ -383,7 +418,7 @@ impl MvccTransactionManager {
             });
         }
 
-        self.stats.lock().writes_performed += 1;
+        self.stats.writes_performed.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -399,7 +434,7 @@ impl MvccTransactionManager {
 
         // Check for write-write conflict
         if let Some(conflicting_txn) = self.check_write_conflict(txn_id, table_id, row_id) {
-            self.stats.lock().write_conflicts += 1;
+            self.stats.write_conflicts.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Transaction(TransactionError::WriteConflict(format!(
                 "Write conflict with transaction {:?}",
                 conflicting_txn
@@ -437,7 +472,7 @@ impl MvccTransactionManager {
             });
         }
 
-        self.stats.lock().writes_performed += 1;
+        self.stats.writes_performed.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -467,7 +502,7 @@ impl MvccTransactionManager {
         // Remove from deadlock detector
         self.deadlock_detector.remove_txn(txn_id);
 
-        self.stats.lock().txns_committed += 1;
+        self.stats.txns_committed.fetch_add(1, Ordering::Relaxed);
 
         Ok(CommitResult::Committed { commit_ts })
     }
@@ -495,7 +530,7 @@ impl MvccTransactionManager {
         // Remove from deadlock detector
         self.deadlock_detector.remove_txn(txn_id);
 
-        self.stats.lock().txns_aborted += 1;
+        self.stats.txns_aborted.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }

@@ -125,59 +125,87 @@ impl BufferFrame {
         }
     }
 
+    /// Get the page ID stored in this frame.
+    /// Uses Acquire ordering to synchronize with page data.
+    #[inline]
     pub fn page_id(&self) -> PageId {
-        PageId(self.page_id.load(Ordering::SeqCst))
+        PageId(self.page_id.load(Ordering::Acquire))
     }
 
+    /// Check if the frame is currently pinned.
+    /// Uses Acquire ordering to synchronize with pin/unpin operations.
+    #[inline]
     pub fn is_pinned(&self) -> bool {
-        self.pin_count.load(Ordering::SeqCst) > 0
+        self.pin_count.load(Ordering::Acquire) > 0
     }
 
+    /// Check if the frame is dirty (modified since last flush).
+    #[inline]
     pub fn is_dirty(&self) -> bool {
-        self.dirty.load(Ordering::SeqCst)
+        self.dirty.load(Ordering::Acquire)
     }
 
+    /// Check if the frame contains a valid page.
+    #[inline]
     pub fn is_valid(&self) -> bool {
-        self.valid.load(Ordering::SeqCst)
+        self.valid.load(Ordering::Acquire)
     }
 
+    /// Pin the frame, preventing eviction.
+    /// Uses AcqRel ordering to ensure visibility to eviction checks.
+    #[inline]
     pub fn pin(&self) {
-        self.pin_count.fetch_add(1, Ordering::SeqCst);
-        self.reference_bit.store(true, Ordering::SeqCst);
+        self.pin_count.fetch_add(1, Ordering::AcqRel);
+        self.reference_bit.store(true, Ordering::Release);
     }
 
+    /// Unpin the frame, allowing eviction when pin_count reaches 0.
+    #[inline]
     pub fn unpin(&self) {
-        let old = self.pin_count.fetch_sub(1, Ordering::SeqCst);
+        let old = self.pin_count.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(old > 0, "Unpin called when pin_count is 0");
     }
 
+    /// Mark the frame as dirty (needs to be written to disk before eviction).
+    #[inline]
     pub fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::SeqCst);
+        self.dirty.store(true, Ordering::Release);
     }
 
+    /// Clear the dirty flag after flushing to disk.
+    #[inline]
     pub fn clear_dirty(&self) {
-        self.dirty.store(false, Ordering::SeqCst);
+        self.dirty.store(false, Ordering::Release);
     }
 
-    /// Reset the frame for a new page
+    /// Reset the frame for a new page.
+    /// Uses Release ordering to ensure all metadata updates are visible.
     pub fn reset(&self, page_id: PageId) {
-        self.page_id.store(page_id.0, Ordering::SeqCst);
-        self.pin_count.store(0, Ordering::SeqCst);
-        self.dirty.store(false, Ordering::SeqCst);
-        self.reference_bit.store(true, Ordering::SeqCst);
-        self.valid.store(false, Ordering::SeqCst);
+        // Order matters: set invalid first, then update metadata, then page_id last
+        self.valid.store(false, Ordering::Release);
+        self.pin_count.store(0, Ordering::Relaxed);
+        self.dirty.store(false, Ordering::Relaxed);
+        self.reference_bit.store(true, Ordering::Relaxed);
+        // page_id is set last with Release to synchronize with readers
+        self.page_id.store(page_id.0, Ordering::Release);
     }
 
+    /// Mark the frame as containing a valid page.
+    #[inline]
     pub fn set_valid(&self) {
-        self.valid.store(true, Ordering::SeqCst);
+        self.valid.store(true, Ordering::Release);
     }
 
+    /// Get the reference bit for Clock algorithm.
+    #[inline]
     pub fn get_reference_bit(&self) -> bool {
-        self.reference_bit.load(Ordering::SeqCst)
+        self.reference_bit.load(Ordering::Relaxed)
     }
 
+    /// Clear the reference bit (second chance given).
+    #[inline]
     pub fn clear_reference_bit(&self) {
-        self.reference_bit.store(false, Ordering::SeqCst);
+        self.reference_bit.store(false, Ordering::Relaxed);
     }
 }
 
@@ -334,8 +362,10 @@ impl DiskManager {
     }
 
     /// Allocate a new page ID.
+    /// Uses Relaxed ordering since uniqueness only requires atomicity, not ordering.
+    #[inline]
     pub fn allocate_page(&self) -> PageId {
-        PageId(self.next_page_id.fetch_add(1, Ordering::SeqCst))
+        PageId(self.next_page_id.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Get the database file path.
@@ -436,8 +466,9 @@ impl BufferPoolImpl {
                 ));
             }
 
+            // Clock hand only needs to advance atomically, no ordering required
             let frame_id =
-                (self.clock_hand.fetch_add(1, Ordering::SeqCst) as usize) % num_frames;
+                (self.clock_hand.fetch_add(1, Ordering::Relaxed) as usize) % num_frames;
             let frame = &self.frames[frame_id];
 
             // Skip pinned frames
@@ -767,7 +798,8 @@ impl LruKTracker {
 
     /// Record an access to a page.
     pub fn record_access(&self, page_id: PageId) {
-        let ts = self.timestamp.fetch_add(1, Ordering::SeqCst);
+        // Timestamp only needs atomicity, not ordering
+        let ts = self.timestamp.fetch_add(1, Ordering::Relaxed);
 
         self.history
             .entry(page_id)
@@ -789,7 +821,7 @@ impl LruKTracker {
     pub fn backward_k_distance(&self, page_id: PageId) -> Option<u64> {
         self.history.get(&page_id).and_then(|history| {
             if history.len() >= self.k {
-                let current_ts = self.timestamp.load(Ordering::SeqCst);
+                let current_ts = self.timestamp.load(Ordering::Relaxed);
                 let kth_access = history.front().copied()?;
                 Some(current_ts - kth_access)
             } else {

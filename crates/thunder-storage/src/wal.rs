@@ -30,11 +30,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 use thunder_common::prelude::*;
 use thunder_common::types::{Lsn, PageId, RowId, TableId, TxnId};
 use tokio::sync::Notify;
+
+/// Default group commit interval in milliseconds
+pub const DEFAULT_GROUP_COMMIT_INTERVAL_MS: u64 = 5;
+
+/// Minimum records before triggering early flush
+pub const DEFAULT_GROUP_COMMIT_MIN_RECORDS: usize = 100;
 
 /// WAL record header size: 40 bytes
 pub const WAL_HEADER_SIZE: usize = 40;
@@ -626,7 +632,12 @@ impl WalBuffer {
     }
 }
 
-/// WAL writer implementation
+/// WAL writer implementation with group commit support.
+///
+/// Group commit significantly improves write throughput by batching multiple
+/// WAL entries into a single fsync operation. Instead of syncing on every write,
+/// transactions wait briefly (configurable interval) for other concurrent writes,
+/// then all pending writes are flushed together.
 pub struct WalWriterImpl {
     /// Current LSN (atomically incremented)
     current_lsn: AtomicU64,
@@ -640,17 +651,33 @@ pub struct WalWriterImpl {
     segment_dir: PathBuf,
     /// Segment size threshold
     segment_size: usize,
-    /// Sync on every commit
+    /// Sync on every commit (when false, relies on periodic flush)
     sync_commit: bool,
     /// Notification for flush completion
     flush_notify: Arc<Notify>,
     /// Per-transaction previous LSN
     txn_prev_lsn: Mutex<HashMap<TxnId, Lsn>>,
+    /// Group commit interval in milliseconds (0 = disabled)
+    group_commit_interval_ms: u64,
+    /// Whether a flush is currently in progress
+    flush_in_progress: AtomicBool,
+    /// Pending commit waiters - tracks LSNs waiting to be flushed
+    pending_commits: Mutex<Vec<(Lsn, Arc<Notify>)>>,
 }
 
 impl WalWriterImpl {
     /// Create a new WAL writer.
     pub fn new(dir: &Path, sync_commit: bool) -> Result<Self> {
+        Self::with_group_commit(dir, sync_commit, DEFAULT_GROUP_COMMIT_INTERVAL_MS)
+    }
+
+    /// Create a new WAL writer with custom group commit interval.
+    ///
+    /// # Arguments
+    /// * `dir` - Directory for WAL segment files
+    /// * `sync_commit` - Whether to sync after each commit (group commit still applies)
+    /// * `group_commit_interval_ms` - How long to wait for batching commits (0 = disabled)
+    pub fn with_group_commit(dir: &Path, sync_commit: bool, group_commit_interval_ms: u64) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|e| {
             Error::Storage(thunder_common::error::StorageError::WalWriteFailed(
                 e.to_string(),
@@ -670,11 +697,19 @@ impl WalWriterImpl {
             sync_commit,
             flush_notify: Arc::new(Notify::new()),
             txn_prev_lsn: Mutex::new(HashMap::new()),
+            group_commit_interval_ms,
+            flush_in_progress: AtomicBool::new(false),
+            pending_commits: Mutex::new(Vec::new()),
         })
     }
 
     /// Open an existing WAL directory.
     pub fn open(dir: &Path, sync_commit: bool) -> Result<Self> {
+        Self::open_with_group_commit(dir, sync_commit, DEFAULT_GROUP_COMMIT_INTERVAL_MS)
+    }
+
+    /// Open an existing WAL directory with custom group commit interval.
+    pub fn open_with_group_commit(dir: &Path, sync_commit: bool, group_commit_interval_ms: u64) -> Result<Self> {
         // Find the latest segment
         let mut segments: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| {
@@ -713,6 +748,9 @@ impl WalWriterImpl {
             sync_commit,
             flush_notify: Arc::new(Notify::new()),
             txn_prev_lsn: Mutex::new(HashMap::new()),
+            group_commit_interval_ms,
+            flush_in_progress: AtomicBool::new(false),
+            pending_commits: Mutex::new(Vec::new()),
         })
     }
 
@@ -754,8 +792,75 @@ impl WalWriterImpl {
     }
 
     /// Allocate a new LSN.
+    /// Uses Relaxed ordering since LSN uniqueness doesn't require sequential consistency.
+    #[inline]
     fn allocate_lsn(&self) -> Lsn {
-        Lsn(self.current_lsn.fetch_add(1, Ordering::SeqCst))
+        Lsn(self.current_lsn.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Wait for the given LSN to be flushed to disk.
+    /// Uses group commit to batch multiple waiters together.
+    async fn wait_for_flush(&self, lsn: Lsn) -> Result<()> {
+        // Fast path: already flushed
+        if self.flushed_lsn.load(Ordering::Acquire) >= lsn.0 {
+            return Ok(());
+        }
+
+        // If group commit is disabled, flush immediately
+        if self.group_commit_interval_ms == 0 {
+            return self.flush_buffer();
+        }
+
+        // Register as a waiter
+        let notify = Arc::new(Notify::new());
+        {
+            let mut pending = self.pending_commits.lock();
+            pending.push((lsn, Arc::clone(&notify)));
+        }
+
+        // Try to become the flusher (leader election)
+        let was_not_flushing = self.flush_in_progress.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ).is_ok();
+
+        if was_not_flushing {
+            // We're the leader - wait for group commit interval then flush
+            tokio::time::sleep(std::time::Duration::from_millis(self.group_commit_interval_ms)).await;
+
+            // Perform the flush
+            let flush_result = self.flush_buffer();
+
+            // Mark flush complete
+            self.flush_in_progress.store(false, Ordering::Release);
+
+            // Notify all waiters
+            let waiters = std::mem::take(&mut *self.pending_commits.lock());
+            let flushed = self.flushed_lsn.load(Ordering::Acquire);
+            for (waiter_lsn, waiter_notify) in waiters {
+                if waiter_lsn.0 <= flushed {
+                    waiter_notify.notify_one();
+                } else {
+                    // Re-add waiters that weren't flushed (shouldn't happen normally)
+                    self.pending_commits.lock().push((waiter_lsn, waiter_notify));
+                }
+            }
+
+            return flush_result;
+        }
+
+        // We're a follower - wait for notification
+        notify.notified().await;
+
+        // Check if our LSN was actually flushed
+        if self.flushed_lsn.load(Ordering::Acquire) >= lsn.0 {
+            Ok(())
+        } else {
+            // Retry if not flushed yet (rare race condition)
+            Box::pin(self.wait_for_flush(lsn)).await
+        }
     }
 
     /// Get the previous LSN for a transaction.
@@ -814,8 +919,10 @@ impl WalWriterImpl {
     }
 
     /// Flush the buffer to disk.
+    /// Optimized to minimize lock hold time during I/O.
     pub fn flush_buffer(&self) -> Result<()> {
-        let (data, _lsns) = {
+        // Take buffer contents with minimal lock time
+        let (data, lsns) = {
             let mut buffer = self.buffer.lock();
             if buffer.is_empty() {
                 return Ok(());
@@ -823,15 +930,33 @@ impl WalWriterImpl {
             buffer.take()
         };
 
+        // Find the max LSN we're about to flush
+        let max_lsn = lsns.iter().max().copied().unwrap_or(Lsn(0));
+
+        // Perform I/O outside the buffer lock
         {
             let mut segment = self.current_segment.lock();
             segment.write(&data)?;
             segment.sync()?;
         }
 
-        // Update flushed LSN
-        let current = self.current_lsn.load(Ordering::SeqCst);
-        self.flushed_lsn.store(current - 1, Ordering::SeqCst);
+        // Update flushed LSN atomically
+        // Use a CAS loop to ensure we only increase, never decrease
+        loop {
+            let current_flushed = self.flushed_lsn.load(Ordering::Acquire);
+            if max_lsn.0 <= current_flushed {
+                break; // Another flush already advanced past us
+            }
+            if self.flushed_lsn.compare_exchange(
+                current_flushed,
+                max_lsn.0,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ).is_ok() {
+                break;
+            }
+            // CAS failed, retry
+        }
 
         // Notify waiters
         self.flush_notify.notify_waiters();
@@ -876,6 +1001,11 @@ impl WalWriterImpl {
 
 #[async_trait]
 impl super::WalWriter for WalWriterImpl {
+    /// Append a WAL entry with group commit optimization.
+    ///
+    /// When sync_commit is enabled, this method uses group commit to batch
+    /// multiple concurrent writes into a single fsync, dramatically improving
+    /// throughput for write-heavy workloads.
     async fn append(&self, entry: WalEntry) -> Result<Lsn> {
         let record_type = match &entry.entry_type {
             WalEntryType::Insert { .. } => WalRecordType::Insert,
@@ -895,9 +1025,9 @@ impl super::WalWriter for WalWriterImpl {
             self.remove_txn(entry.txn_id);
         }
 
-        // Sync if configured
+        // Use group commit for durability - batches multiple writers into single fsync
         if self.sync_commit {
-            self.flush_buffer()?;
+            self.wait_for_flush(lsn).await?;
         }
 
         Ok(lsn)
@@ -1029,7 +1159,7 @@ impl super::WalWriter for WalWriterImpl {
     }
 
     fn current_lsn(&self) -> Lsn {
-        Lsn(self.current_lsn.load(Ordering::SeqCst))
+        Lsn(self.current_lsn.load(Ordering::Relaxed))
     }
 }
 
