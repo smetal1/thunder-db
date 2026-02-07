@@ -1,0 +1,161 @@
+# Default values for ThunderDB Helm chart
+
+# Number of replicas
+replicaCount: 1
+
+# Image configuration
+image:
+  repository: saurav7055/thunderdb
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Image pull secrets (if using private registry)
+imagePullSecrets: []
+
+# Override chart name
+nameOverride: ""
+fullnameOverride: ""
+
+# Service account configuration
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext: {}
+
+# Container security context
+securityContext: {}
+
+# Service configuration
+service:
+  type: ClusterIP
+  ports:
+    postgres: 5432
+    mysql: 3306
+    resp: 6379
+    http: 8080
+    grpc: 9090
+
+# Resource requests and limits
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: 4
+    memory: 8Gi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Persistence configuration
+persistence:
+  data:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  wal:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# Health check probes
+probes:
+  startup:
+    enabled: true
+    path: /admin/live
+    port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 30
+  liveness:
+    enabled: true
+    path: /admin/live
+    port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /admin/ready
+    port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Termination grace period
+terminationGracePeriodSeconds: 30
+
+# ThunderDB configuration
+config:
+  # Core settings
+  nodeId: 1
+  queryTimeout: "30s"
+  maxResultRows: 1000000
+
+  # Storage settings
+  storage:
+    bufferPoolSize: "1GB"
+    walBufferSize: "64MB"
+    pageSize: "16KB"
+    checkpointInterval: "5m"
+    compactionThreads: 4
+    directIo: true
+    compression:
+      enabled: true
+      algorithm: "lz4"
+    maxWalSize: "2GB"
+    diskSpaceWarningThreshold: 10
+    diskSpaceCriticalThreshold: 5
+
+  # Cluster settings
+  cluster:
+    name: "thunderdb-k8s"
+    replicationFactor: 1
+    autoBalance: false
+    raftElectionTimeout: "1s"
+    raftHeartbeatInterval: "100ms"
+    maxRegionSize: "256MB"
+    minRegionSize: "64MB"
+    peers: []
+
+  # Security settings
+  security:
+    authenticationEnabled: true
+    tlsEnabled: false
+    superuser: "admin"
+
+  # Logging settings
+  logging:
+    level: "info"
+    format: "json"
+    slowQueryLogging:
+      enabled: true
+      threshold: "1s"
+
+# Credentials
+credentials:
+  # The superuser password hash (Argon2id)
+  # Generate with: thunderdb --hash-password "your-secure-password"
+  superuserPasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
+  # Alternatively, use an existing secret
+  existingSecret: ""
+  existingSecretKey: "THUNDERDB_SUPERUSER_PASSWORD_HASH"

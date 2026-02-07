@@ -21,6 +21,9 @@ pub mod resp;
 pub mod session;
 pub mod auth;
 pub mod tls;
+pub mod pgbench;
+pub mod pool;
+pub mod mysql_compat;
 
 // Re-export PostgreSQL protocol types
 pub use postgres::{
@@ -71,6 +74,30 @@ pub use tls::{
     TlsError,
     MaybeTlsStream,
     ReloadableTlsAcceptor,
+};
+
+// Re-export pgbench compatibility types
+pub use pgbench::{
+    PgbenchCompat,
+    CatalogQueryResult,
+    CopyCommand,
+    CopySource,
+    CopyFormat,
+    BatchInsertBuilder,
+};
+
+// Re-export connection pooling types
+pub use pool::{
+    ServerConnectionPool,
+    PooledConnection,
+    PoolConfig as ServerPoolConfig,
+    PoolStats,
+};
+
+// Re-export MySQL compatibility types
+pub use mysql_compat::{
+    MySqlCompat,
+    MySqlQueryResult,
 };
 
 // Re-export session management types

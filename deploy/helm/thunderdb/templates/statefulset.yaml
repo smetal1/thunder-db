@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "thunderdb.fullname" . }}
+  labels:
+    {{- include "thunderdb.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "thunderdb.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "thunderdb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "thunderdb.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - thunderdb
+            - --config
+            - /etc/thunderdb/thunderdb.toml
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.service.ports.postgres }}
+              protocol: TCP
+            - name: mysql
+              containerPort: {{ .Values.service.ports.mysql }}
+              protocol: TCP
+            - name: resp
+              containerPort: {{ .Values.service.ports.resp }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.service.ports.http }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.ports.grpc }}
+              protocol: TCP
+          env:
+            - name: THUNDERDB_SUPERUSER_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thunderdb.secretName" . }}
+                  key: {{ .Values.credentials.existingSecretKey }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.probes.startup.port }}
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/thunderdb
+              readOnly: true
+            {{- if .Values.persistence.data.enabled }}
+            - name: data
+              mountPath: /var/lib/thunderdb/data
+            {{- end }}
+            {{- if .Values.persistence.wal.enabled }}
+            - name: wal
+              mountPath: /var/lib/thunderdb/wal
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "thunderdb.configmapName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    {{- if .Values.persistence.data.enabled }}
+    - metadata:
+        name: data
+        labels:
+          {{- include "thunderdb.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.data.accessMode }}
+        {{- if .Values.persistence.data.storageClass }}
+        storageClassName: {{ .Values.persistence.data.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.data.size }}
+    {{- end }}
+    {{- if .Values.persistence.wal.enabled }}
+    - metadata:
+        name: wal
+        labels:
+          {{- include "thunderdb.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.wal.accessMode }}
+        {{- if .Values.persistence.wal.storageClass }}
+        storageClassName: {{ .Values.persistence.wal.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.wal.size }}
+    {{- end }}

@@ -2,7 +2,7 @@
 # Uses limited parallelism to avoid OOM during Rust compilation
 
 # Stage 1: Build with limited resources
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

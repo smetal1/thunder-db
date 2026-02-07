@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thunderdb-pgbench
+  namespace: thunderdb
+  labels:
+    app: thunderdb-benchmark
+    benchmark: pgbench
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: thunderdb-benchmark
+        benchmark: pgbench
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pgbench
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache bc
+              chmod +x /scripts/pgbench.sh
+              /scripts/pgbench.sh
+          env:
+            - name: THUNDERDB_HOST
+              value: "thunderdb.thunderdb.svc.cluster.local"
+            - name: THUNDERDB_PG_PORT
+              value: "5432"
+            - name: THUNDERDB_USER
+              value: "admin"
+            - name: THUNDERDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: thunderdb-credentials
+                  key: THUNDERDB_SUPERUSER_PASSWORD_HASH
+                  optional: true
+            - name: THUNDERDB_DATABASE
+              value: "benchmark"
+            - name: REPORT_DIR
+              value: "/reports"
+            - name: PGBENCH_SCALE
+              value: "10"
+            - name: PGBENCH_CLIENTS
+              value: "10"
+            - name: PGBENCH_THREADS
+              value: "2"
+            - name: PGBENCH_DURATION
+              value: "60"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: reports
+              mountPath: /reports
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2
+              memory: 1Gi
+      volumes:
+        - name: scripts
+          configMap:
+            name: thunderdb-benchmark-scripts
+            defaultMode: 0755
+        - name: reports
+          emptyDir: {}

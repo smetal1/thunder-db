@@ -1,0 +1,44 @@
+ThunderDB has been deployed successfully!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+To access ThunderDB:
+
+1. Get the service endpoint:
+   kubectl get svc {{ include "thunderdb.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Port-forward to access locally:
+   # PostgreSQL protocol
+   kubectl port-forward svc/{{ include "thunderdb.fullname" . }} 5432:{{ .Values.service.ports.postgres }} -n {{ .Release.Namespace }}
+
+   # MySQL protocol
+   kubectl port-forward svc/{{ include "thunderdb.fullname" . }} 3306:{{ .Values.service.ports.mysql }} -n {{ .Release.Namespace }}
+
+   # Redis protocol (RESP)
+   kubectl port-forward svc/{{ include "thunderdb.fullname" . }} 6379:{{ .Values.service.ports.resp }} -n {{ .Release.Namespace }}
+
+   # HTTP API
+   kubectl port-forward svc/{{ include "thunderdb.fullname" . }} 8080:{{ .Values.service.ports.http }} -n {{ .Release.Namespace }}
+
+   # gRPC API
+   kubectl port-forward svc/{{ include "thunderdb.fullname" . }} 9090:{{ .Values.service.ports.grpc }} -n {{ .Release.Namespace }}
+
+3. Connect using your preferred client:
+   # PostgreSQL
+   psql -h localhost -p 5432 -U {{ .Values.config.security.superuser }}
+
+   # MySQL
+   mysql -h localhost -P 3306 -u {{ .Values.config.security.superuser }} -p
+
+   # Redis
+   redis-cli -h localhost -p 6379
+
+4. Check pod status:
+   kubectl get pods -l app.kubernetes.io/name={{ include "thunderdb.name" . }} -n {{ .Release.Namespace }}
+
+5. View logs:
+   kubectl logs -l app.kubernetes.io/name={{ include "thunderdb.name" . }} -n {{ .Release.Namespace }} -f
+
+IMPORTANT: Make sure to change the default superuser password before production use!
+Generate a new password hash with: thunderdb --hash-password "your-secure-password"

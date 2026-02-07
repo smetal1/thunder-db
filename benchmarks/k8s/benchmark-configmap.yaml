@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thunderdb-benchmark-scripts
+  namespace: thunderdb
+  labels:
+    app: thunderdb-benchmark
+data:
+  pgbench.sh: |
+    #!/bin/bash
+    set -e
+
+    HOST="${THUNDERDB_HOST:-thunderdb.thunderdb.svc.cluster.local}"
+    PORT="${THUNDERDB_PG_PORT:-5432}"
+    USER="${THUNDERDB_USER:-admin}"
+    PASSWORD="${THUNDERDB_PASSWORD:-}"
+    DATABASE="${THUNDERDB_DATABASE:-benchmark}"
+    REPORT_DIR="${REPORT_DIR:-/reports}"
+    SCALE="${PGBENCH_SCALE:-10}"
+    CLIENTS="${PGBENCH_CLIENTS:-10}"
+    THREADS="${PGBENCH_THREADS:-2}"
+    DURATION="${PGBENCH_DURATION:-60}"
+
+    export PGPASSWORD="$PASSWORD"
+
+    REPORT_FILE="${REPORT_DIR}/pgbench_report_$(date +%Y%m%d_%H%M%S).txt"
+    JSON_REPORT="${REPORT_DIR}/pgbench_report_$(date +%Y%m%d_%H%M%S).json"
+
+    echo "Starting PostgreSQL Protocol Benchmark"
+    echo "Target: $HOST:$PORT"
+
+    {
+        echo "=============================================="
+        echo "ThunderDB PostgreSQL Protocol Benchmark Report"
+        echo "=============================================="
+        echo "Date: $(date)"
+        echo "Host: $HOST:$PORT"
+        echo "Scale Factor: $SCALE"
+        echo "Clients: $CLIENTS"
+        echo "Duration: ${DURATION}s"
+        echo "=============================================="
+    } > "$REPORT_FILE"
+
+    # Wait for ThunderDB to be ready
+    until pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5; do
+        echo "Waiting for ThunderDB..."
+        sleep 2
+    done
+
+    # Setup database
+    psql -h "$HOST" -p "$PORT" -U "$USER" -c "DROP DATABASE IF EXISTS $DATABASE;" 2>/dev/null || true
+    psql -h "$HOST" -p "$PORT" -U "$USER" -c "CREATE DATABASE $DATABASE;" 2>/dev/null || true
+
+    # Initialize
+    INIT_START=$(date +%s.%N)
+    pgbench -h "$HOST" -p "$PORT" -U "$USER" -i -s "$SCALE" "$DATABASE" 2>&1 | tee -a "$REPORT_FILE"
+    INIT_END=$(date +%s.%N)
+    INIT_TIME=$(echo "$INIT_END - $INIT_START" | bc)
+
+    # Read-only
+    echo "Running READ-ONLY benchmark..." | tee -a "$REPORT_FILE"
+    READ_RESULT=$(pgbench -h "$HOST" -p "$PORT" -U "$USER" -S -c "$CLIENTS" -j "$THREADS" -T "$DURATION" -P 5 "$DATABASE" 2>&1)
+    echo "$READ_RESULT" >> "$REPORT_FILE"
+    READ_TPS=$(echo "$READ_RESULT" | grep "tps = " | tail -1 | awk '{print $3}')
+
+    # Read-write
+    echo "Running READ-WRITE benchmark..." | tee -a "$REPORT_FILE"
+    RW_RESULT=$(pgbench -h "$HOST" -p "$PORT" -U "$USER" -c "$CLIENTS" -j "$THREADS" -T "$DURATION" -P 5 "$DATABASE" 2>&1)
+    echo "$RW_RESULT" >> "$REPORT_FILE"
+    RW_TPS=$(echo "$RW_RESULT" | grep "tps = " | tail -1 | awk '{print $3}')
+
+    # JSON report
+    cat > "$JSON_REPORT" <<EOF
+    {
+        "benchmark": "pgbench",
+        "protocol": "postgresql",
+        "timestamp": "$(date -Iseconds)",
+        "results": {
+            "init_time": $INIT_TIME,
+            "read_only_tps": ${READ_TPS:-0},
+            "read_write_tps": ${RW_TPS:-0}
+        }
+    }
+    EOF
+
+    echo "=============================================="
+    echo "SUMMARY"
+    echo "Read-Only TPS: ${READ_TPS:-N/A}"
+    echo "Read-Write TPS: ${RW_TPS:-N/A}"
+    echo "=============================================="
+    cat "$REPORT_FILE"
+    cat "$JSON_REPORT"
+
+  redis-benchmark.sh: |
+    #!/bin/bash
+    set -e
+
+    HOST="${THUNDERDB_HOST:-thunderdb.thunderdb.svc.cluster.local}"
+    PORT="${THUNDERDB_RESP_PORT:-6379}"
+    PASSWORD="${THUNDERDB_PASSWORD:-}"
+    REPORT_DIR="${REPORT_DIR:-/reports}"
+    CLIENTS="${REDIS_CLIENTS:-50}"
+    REQUESTS="${REDIS_REQUESTS:-100000}"
+    DATA_SIZE="${REDIS_DATA_SIZE:-256}"
+
+    REPORT_FILE="${REPORT_DIR}/redis_report_$(date +%Y%m%d_%H%M%S).txt"
+    JSON_REPORT="${REPORT_DIR}/redis_report_$(date +%Y%m%d_%H%M%S).json"
+
+    AUTH_FLAG=""
+    [ -n "$PASSWORD" ] && AUTH_FLAG="-a $PASSWORD"
+
+    echo "Starting Redis Protocol Benchmark"
+    echo "Target: $HOST:$PORT"
+
+    {
+        echo "=============================================="
+        echo "ThunderDB Redis Protocol Benchmark Report"
+        echo "=============================================="
+        echo "Date: $(date)"
+        echo "Host: $HOST:$PORT"
+        echo "Clients: $CLIENTS"
+        echo "Requests: $REQUESTS"
+        echo "=============================================="
+    } > "$REPORT_FILE"
+
+    # Wait for ThunderDB
+    until redis-cli -h "$HOST" -p "$PORT" $AUTH_FLAG PING 2>/dev/null | grep -q "PONG"; do
+        echo "Waiting for ThunderDB..."
+        sleep 2
+    done
+
+    # Run benchmark
+    redis-benchmark -h "$HOST" -p "$PORT" $AUTH_FLAG -c "$CLIENTS" -n "$REQUESTS" -d "$DATA_SIZE" --csv > "${REPORT_DIR}/redis_csv_$(date +%Y%m%d_%H%M%S).csv"
+
+    # Individual tests
+    declare -A RESULTS
+    for cmd in ping set get incr lpush rpush lpop sadd hset; do
+        RESULT=$(redis-benchmark -h "$HOST" -p "$PORT" $AUTH_FLAG -c "$CLIENTS" -n "$REQUESTS" -t $cmd 2>&1 | grep "requests per second")
+        RESULTS[$cmd]=$(echo "$RESULT" | awk '{print $1}')
+        echo "$cmd: $RESULT" | tee -a "$REPORT_FILE"
+    done
+
+    echo "=============================================="
+    echo "SUMMARY (requests/second)"
+    for cmd in "${!RESULTS[@]}"; do
+        echo "$cmd: ${RESULTS[$cmd]}"
+    done
+    echo "=============================================="
+    cat "$REPORT_FILE"

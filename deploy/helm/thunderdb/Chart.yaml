@@ -1,0 +1,15 @@
+apiVersion: v2
+name: thunderdb
+description: A Helm chart for deploying ThunderDB - a high-performance multi-protocol database
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - database
+  - postgresql
+  - mysql
+  - redis
+  - distributed
+home: https://github.com/saurav7055/thunderdb
+maintainers:
+  - name: Saurav

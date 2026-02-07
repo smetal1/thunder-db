@@ -19,6 +19,7 @@ use thunder_common::prelude::*;
 
 use crate::{AuthMethod, AuthResult, ConnectionLimiter, MaybeTlsStream, PreparedStatement, ProtocolConfig, ProtocolHandler, ReloadableTlsAcceptor, Session, TlsConfig, TlsError};
 use crate::auth::{compute_md5_hash, verify_password};
+use crate::pgbench::{PgbenchCompat, CatalogQueryResult, CopyCommand, CopySource, CopyFormat, BatchInsertBuilder};
 
 /// Global registry for cancel tokens, keyed by (process_id, secret_key)
 type CancelRegistry = Arc<DashMap<(i32, i32), CancellationToken>>;
@@ -365,6 +366,10 @@ struct PostgresConnection<E: QueryExecutor> {
     current_cancel_token: Option<CancellationToken>,
     /// Initial bytes already read during SSL negotiation
     initial_startup_bytes: Option<[u8; 8]>,
+    /// pgbench compatibility handler
+    pgbench_compat: Arc<PgbenchCompat>,
+    /// COPY command state for batch loading
+    copy_state: Option<CopyState>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +383,13 @@ struct PreparedStatementInfo {
 struct PortalInfo {
     statement_name: String,
     params: Vec<Option<Vec<u8>>>,
+}
+
+/// State for COPY command processing
+struct CopyState {
+    command: CopyCommand,
+    batch_builder: BatchInsertBuilder,
+    rows_copied: u64,
 }
 
 impl<E: QueryExecutor> PostgresConnection<E> {
@@ -406,6 +418,8 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             cancel_registry,
             current_cancel_token: None,
             initial_startup_bytes: ssl_result.initial_bytes,
+            pgbench_compat: Arc::new(PgbenchCompat::new()),
+            copy_state: None,
         }
     }
 
@@ -685,6 +699,71 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             return Ok(());
         }
 
+        // ================================================================
+        // pgbench compatibility: intercept special commands
+        // ================================================================
+
+        // Handle CREATE DATABASE (virtual - always succeeds for pgbench)
+        if PgbenchCompat::is_create_database(&query) {
+            let result = self.pgbench_compat.handle_create_database(&query);
+            self.send_command_complete(&result.command_tag).await?;
+            self.send_ready_for_query().await?;
+            return Ok(());
+        }
+
+        // Handle DROP DATABASE (virtual - always succeeds for pgbench)
+        if PgbenchCompat::is_drop_database(&query) {
+            let result = self.pgbench_compat.handle_drop_database(&query);
+            self.send_command_complete(&result.command_tag).await?;
+            self.send_ready_for_query().await?;
+            return Ok(());
+        }
+
+        // Handle VACUUM (no-op for now)
+        if PgbenchCompat::is_vacuum_command(&query) {
+            let result = self.pgbench_compat.handle_vacuum(&query);
+            self.send_command_complete(&result.command_tag).await?;
+            self.send_ready_for_query().await?;
+            return Ok(());
+        }
+
+        // Handle TRUNCATE by converting to DELETE
+        if PgbenchCompat::is_truncate_command(&query) {
+            if let Some(delete_sql) = self.pgbench_compat.handle_truncate(&query) {
+                // Execute the DELETE instead of TRUNCATE
+                let result = self.executor.execute(session_id, &delete_sql).await;
+                match result {
+                    Ok(r) => {
+                        self.send_command_complete(&format!("DELETE {}", r.rows_affected.unwrap_or(0))).await?;
+                    }
+                    Err(e) => {
+                        self.transaction_state = TXN_FAILED;
+                        self.send_error(e.sqlstate(), &e.to_string()).await?;
+                    }
+                }
+            } else {
+                self.send_command_complete("TRUNCATE TABLE").await?;
+            }
+            self.send_ready_for_query().await?;
+            return Ok(());
+        }
+
+        // Handle COPY command (for bulk data loading)
+        if PgbenchCompat::is_copy_command(&query) {
+            return self.handle_copy_command(&query).await;
+        }
+
+        // Handle system catalog queries (pg_catalog, version(), etc.)
+        if PgbenchCompat::is_catalog_query(&query) {
+            if let Some(result) = self.pgbench_compat.handle_catalog_query(&query) {
+                return self.send_catalog_result(result).await;
+            }
+        }
+
+        // ================================================================
+        // Normal query execution
+        // ================================================================
+
         // Create and register cancellation token
         let cancel_token = CancellationToken::new();
         self.cancel_registry.insert(self.backend_key, cancel_token.clone());
@@ -723,6 +802,178 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             }
         }
 
+        self.send_ready_for_query().await?;
+        Ok(())
+    }
+
+    /// Handle COPY command for bulk data loading
+    async fn handle_copy_command(&mut self, query: &str) -> Result<()> {
+        let session_id = self.session_id.ok_or_else(||
+            Error::Internal("No session".into()))?;
+
+        let copy_cmd = CopyCommand::parse(query)
+            .ok_or_else(|| Error::Internal("Failed to parse COPY command".to_string()))?;
+
+        if !copy_cmd.is_from {
+            // COPY TO - not supported yet
+            self.send_error("0A000", "COPY TO is not yet supported").await?;
+            self.send_ready_for_query().await?;
+            return Ok(());
+        }
+
+        match &copy_cmd.source {
+            CopySource::Stdin => {
+                // Send CopyInResponse
+                self.send_copy_in_response(&copy_cmd).await?;
+
+                // Initialize batch builder
+                let columns = copy_cmd.columns.clone().unwrap_or_default();
+                let batch_builder = BatchInsertBuilder::new(&copy_cmd.table_name, columns, 100);
+
+                self.copy_state = Some(CopyState {
+                    command: copy_cmd,
+                    batch_builder,
+                    rows_copied: 0,
+                });
+
+                // Process COPY data
+                let result = self.process_copy_data(session_id).await;
+
+                // Clear copy state
+                let rows_copied = self.copy_state.as_ref().map(|s| s.rows_copied).unwrap_or(0);
+                self.copy_state = None;
+
+                match result {
+                    Ok(()) => {
+                        self.send_command_complete(&format!("COPY {}", rows_copied)).await?;
+                    }
+                    Err(e) => {
+                        self.transaction_state = TXN_FAILED;
+                        self.send_error(e.sqlstate(), &e.to_string()).await?;
+                    }
+                }
+            }
+            CopySource::File(_) => {
+                self.send_error("0A000", "COPY FROM file is not supported; use STDIN").await?;
+            }
+            CopySource::Stdout => {
+                self.send_error("0A000", "COPY TO STDOUT is not yet supported").await?;
+            }
+        }
+
+        self.send_ready_for_query().await?;
+        Ok(())
+    }
+
+    /// Process COPY data from client
+    async fn process_copy_data(&mut self, session_id: uuid::Uuid) -> Result<()> {
+        loop {
+            // Read message type
+            let msg_type = self.read_message_type().await?;
+
+            match msg_type {
+                b'd' => {
+                    // CopyData message
+                    let length = self.read_i32().await? - 4;
+                    let mut data = vec![0u8; length as usize];
+                    self.stream.read_exact(&mut data).await
+                        .map_err(|e| Error::Internal(e.to_string()))?;
+
+                    // Parse and process the data line
+                    let line = String::from_utf8_lossy(&data);
+                    for row_line in line.lines() {
+                        if row_line == "\\." {
+                            continue; // End of data marker
+                        }
+
+                        if let Some(ref mut state) = self.copy_state {
+                            let values = state.command.parse_line(row_line);
+                            if !values.is_empty() {
+                                if let Some(insert_sql) = state.batch_builder.add_row(values) {
+                                    // Execute batch insert
+                                    self.executor.execute(session_id, &insert_sql).await?;
+                                }
+                                state.rows_copied += 1;
+                            }
+                        }
+                    }
+                }
+                b'c' => {
+                    // CopyDone message
+                    let _length = self.read_i32().await?;
+
+                    // Flush any remaining rows
+                    if let Some(ref mut state) = self.copy_state {
+                        if state.batch_builder.has_pending() {
+                            let insert_sql = state.batch_builder.build_insert();
+                            if !insert_sql.is_empty() {
+                                self.executor.execute(session_id, &insert_sql).await?;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+                b'f' => {
+                    // CopyFail message
+                    let _length = self.read_i32().await?;
+                    let error_msg = self.read_cstring().await?;
+                    return Err(Error::Internal(format!("COPY failed: {}", error_msg)));
+                }
+                _ => {
+                    return Err(Error::Internal(format!("Unexpected message type during COPY: {}", msg_type as char)));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send CopyInResponse message
+    async fn send_copy_in_response(&mut self, cmd: &CopyCommand) -> Result<()> {
+        let format_code: i8 = match cmd.format {
+            CopyFormat::Text => 0,
+            CopyFormat::Csv => 0,
+            CopyFormat::Binary => 1,
+        };
+
+        let num_columns = cmd.columns.as_ref().map(|c| c.len()).unwrap_or(0) as i16;
+
+        self.write_buf.clear();
+        self.write_buf.put_u8(b'G'); // CopyInResponse
+        self.write_buf.put_i32(4 + 1 + 2 + (num_columns as i32 * 2));
+        self.write_buf.put_i8(format_code);
+        self.write_buf.put_i16(num_columns);
+        for _ in 0..num_columns {
+            self.write_buf.put_i16(0); // Text format for each column
+        }
+        self.flush().await
+    }
+
+    /// Send catalog query result
+    async fn send_catalog_result(&mut self, result: CatalogQueryResult) -> Result<()> {
+        // Convert to ColumnInfo format
+        let columns: Vec<ColumnInfo> = result.columns.iter().map(|(name, dtype)| {
+            ColumnInfo {
+                name: name.clone(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: datatype_to_oid(dtype),
+                type_size: -1,
+                type_modifier: -1,
+                format: 0,
+            }
+        }).collect();
+
+        if !columns.is_empty() {
+            self.send_row_description(&columns).await?;
+            for row in &result.rows {
+                let string_row: Vec<Option<String>> = row.clone();
+                self.send_data_row(&string_row).await?;
+            }
+        }
+
+        self.send_command_complete(&result.command_tag).await?;
         self.send_ready_for_query().await?;
         Ok(())
     }

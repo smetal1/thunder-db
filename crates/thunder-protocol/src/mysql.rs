@@ -18,6 +18,7 @@ use thunder_common::prelude::*;
 use crate::{AuthMethod, ConnectionLimiter, MaybeTlsStream, ProtocolConfig, ProtocolHandler, Session};
 use crate::auth::{mysql_native_password, mysql_caching_sha2};
 use crate::postgres::{QueryExecutor, QueryResult, ColumnInfo};
+use crate::mysql_compat::MySqlCompat;
 
 // ============================================================================
 // MySQL Protocol Constants
@@ -206,6 +207,8 @@ struct MySqlConnection<E: QueryExecutor> {
     next_stmt_id: u32,
     tls_acceptor: Option<TlsAcceptor>,
     tls_available: bool,
+    /// MySQL compatibility handler for system queries
+    mysql_compat: Arc<MySqlCompat>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +239,7 @@ impl<E: QueryExecutor> MySqlConnection<E> {
             next_stmt_id: 1,
             tls_acceptor,
             tls_available,
+            mysql_compat: Arc::new(MySqlCompat::new()),
         }
     }
 
@@ -515,16 +519,29 @@ impl<E: QueryExecutor> MySqlConnection<E> {
         let session_id = self.session_id.ok_or_else(||
             Error::Internal("No session".into()))?;
 
-        // Handle special queries
+        // Handle system queries using the MySQL compatibility handler
+        if MySqlCompat::is_system_query(&query) {
+            if let Some(result) = self.mysql_compat.handle_query(&query) {
+                return self.send_mysql_compat_result(&result).await;
+            }
+        }
+
+        // Handle transaction control
         let upper = query.trim().to_uppercase();
-        if upper.starts_with("SET ") {
-            // Accept SET commands silently
+        if upper.starts_with("BEGIN") || upper.starts_with("START TRANSACTION") {
+            self.server_status |= SERVER_STATUS_IN_TRANS;
             self.send_ok(0, 0).await?;
             return Ok(());
         }
-        if upper.starts_with("SELECT @@") || upper.contains("INFORMATION_SCHEMA") {
-            // Handle system variable queries
-            return self.handle_system_query(&query).await;
+        if upper.starts_with("COMMIT") {
+            self.server_status &= !SERVER_STATUS_IN_TRANS;
+            self.send_ok(0, 0).await?;
+            return Ok(());
+        }
+        if upper.starts_with("ROLLBACK") {
+            self.server_status &= !SERVER_STATUS_IN_TRANS;
+            self.send_ok(0, 0).await?;
+            return Ok(());
         }
 
         // Execute query
@@ -545,9 +562,33 @@ impl<E: QueryExecutor> MySqlConnection<E> {
         Ok(())
     }
 
-    async fn handle_system_query(&mut self, _query: &str) -> Result<()> {
-        // Return empty result for system queries
-        self.send_ok(0, 0).await
+    /// Send a result from the MySQL compatibility handler
+    async fn send_mysql_compat_result(&mut self, result: &crate::mysql_compat::MySqlQueryResult) -> Result<()> {
+        if result.columns.is_empty() {
+            self.send_ok(result.affected_rows, 0).await
+        } else {
+            // Convert to QueryResult format
+            let columns: Vec<ColumnInfo> = result.columns.iter().map(|(name, _dtype)| {
+                ColumnInfo {
+                    name: name.clone(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: 25, // TEXT
+                    type_size: -1,
+                    type_modifier: -1,
+                    format: 0,
+                }
+            }).collect();
+
+            let query_result = QueryResult {
+                columns,
+                rows: result.rows.clone(),
+                rows_affected: Some(result.affected_rows),
+                command_tag: format!("SELECT {}", result.rows.len()),
+            };
+
+            self.send_result_set(&query_result).await
+        }
     }
 
     async fn handle_init_db(&mut self, data: &[u8]) -> Result<()> {

@@ -1,0 +1,118 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thunderdb-sysbench
+  namespace: thunderdb
+  labels:
+    app: thunderdb-benchmark
+    benchmark: sysbench
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: thunderdb-benchmark
+        benchmark: sysbench
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sysbench
+          image: severalnines/sysbench:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              HOST="${THUNDERDB_HOST:-thunderdb.thunderdb.svc.cluster.local}"
+              PORT="${THUNDERDB_MYSQL_PORT:-3306}"
+              USER="${THUNDERDB_USER:-admin}"
+              PASSWORD="${THUNDERDB_PASSWORD:-}"
+              DATABASE="${THUNDERDB_DATABASE:-benchmark}"
+              TABLE_SIZE="${SYSBENCH_TABLE_SIZE:-10000}"
+              TABLES="${SYSBENCH_TABLES:-4}"
+              THREADS="${SYSBENCH_THREADS:-8}"
+              DURATION="${SYSBENCH_DURATION:-60}"
+
+              SYSBENCH_COMMON="--mysql-host=$HOST --mysql-port=$PORT --mysql-user=$USER --mysql-password=$PASSWORD --mysql-db=$DATABASE"
+
+              echo "=============================================="
+              echo "ThunderDB MySQL Protocol Benchmark (sysbench)"
+              echo "=============================================="
+              echo "Date: $(date)"
+              echo "Host: $HOST:$PORT"
+              echo "Tables: $TABLES x $TABLE_SIZE rows"
+              echo "Threads: $THREADS"
+              echo "Duration: ${DURATION}s"
+              echo "=============================================="
+
+              # Wait for ThunderDB
+              until mysql -h "$HOST" -P "$PORT" -u "$USER" -p"$PASSWORD" -e "SELECT 1" 2>/dev/null; do
+                  echo "Waiting for ThunderDB MySQL interface..."
+                  sleep 2
+              done
+
+              # Create database
+              mysql -h "$HOST" -P "$PORT" -u "$USER" -p"$PASSWORD" -e "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;" 2>/dev/null || true
+
+              # Prepare
+              echo "Preparing tables..."
+              sysbench oltp_read_write $SYSBENCH_COMMON --tables=$TABLES --table-size=$TABLE_SIZE prepare
+
+              # Run tests
+              echo ""
+              echo "=== OLTP Read-Only ==="
+              sysbench oltp_read_only $SYSBENCH_COMMON --tables=$TABLES --table-size=$TABLE_SIZE --threads=$THREADS --time=$DURATION --report-interval=10 run
+
+              echo ""
+              echo "=== OLTP Read-Write ==="
+              sysbench oltp_read_write $SYSBENCH_COMMON --tables=$TABLES --table-size=$TABLE_SIZE --threads=$THREADS --time=$DURATION --report-interval=10 run
+
+              echo ""
+              echo "=== OLTP Write-Only ==="
+              sysbench oltp_write_only $SYSBENCH_COMMON --tables=$TABLES --table-size=$TABLE_SIZE --threads=$THREADS --time=$DURATION --report-interval=10 run
+
+              echo ""
+              echo "=== Point Select ==="
+              sysbench oltp_point_select $SYSBENCH_COMMON --tables=$TABLES --table-size=$TABLE_SIZE --threads=$THREADS --time=$DURATION --report-interval=10 run
+
+              # Cleanup
+              echo ""
+              echo "Cleaning up..."
+              sysbench oltp_read_write $SYSBENCH_COMMON --tables=$TABLES cleanup
+
+              echo ""
+              echo "=============================================="
+              echo "Benchmark Complete!"
+              echo "=============================================="
+          env:
+            - name: THUNDERDB_HOST
+              value: "thunderdb.thunderdb.svc.cluster.local"
+            - name: THUNDERDB_MYSQL_PORT
+              value: "3306"
+            - name: THUNDERDB_USER
+              value: "admin"
+            - name: THUNDERDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: thunderdb-credentials
+                  key: THUNDERDB_SUPERUSER_PASSWORD_HASH
+                  optional: true
+            - name: THUNDERDB_DATABASE
+              value: "benchmark"
+            - name: SYSBENCH_TABLE_SIZE
+              value: "10000"
+            - name: SYSBENCH_TABLES
+              value: "4"
+            - name: SYSBENCH_THREADS
+              value: "8"
+            - name: SYSBENCH_DURATION
+              value: "60"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2
+              memory: 1Gi

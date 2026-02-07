@@ -23,7 +23,9 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: thunderdb
-          image: thunderdb/thunderdb:latest
+          image: saurav7055/thunderdb:0.1.0
+          command:
+            - "thunderdb"
           args:
             - "--config"
             - "/etc/thunderdb/thunderdb.toml"
