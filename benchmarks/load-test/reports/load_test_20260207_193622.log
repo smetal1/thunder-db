@@ -1,0 +1,25 @@
+╔════════════════════════════════════════════════════════════════╗
+║           ThunderDB Load Test Suite (Kubernetes)               ║
+╠════════════════════════════════════════════════════════════════╣
+║  Host: thunderdb:5432
+║  User: admin
+║  Database: default
+║  Duration: 15s per test
+║  Concurrency levels: 1 4 8
+║  Latency samples: 100
+╚════════════════════════════════════════════════════════════════╝
+
+[INFO] 2026-02-07 14:06:31 Testing connection to ThunderDB...
+[SUCCESS] 2026-02-07 14:06:31 Connected to ThunderDB
+[INFO] 2026-02-07 14:06:31 Initializing test tables...
+[INFO] 2026-02-07 14:06:31 Initializing test tables...
+CREATE TABLE
+CREATE TABLE
+[INFO] 2026-02-07 14:06:31 Inserting initial test data (1000 rows)...
+[INFO] 2026-02-07 14:11:31   Batch 1/10 complete
+[INFO] 2026-02-07 14:16:31   Batch 2/10 complete
+[INFO] 2026-02-07 14:21:31   Batch 3/10 complete
+[INFO] 2026-02-07 14:26:31   Batch 4/10 complete
+[INFO] 2026-02-07 14:31:31   Batch 5/10 complete
+[INFO] 2026-02-07 14:36:31   Batch 6/10 complete
+[INFO] 2026-02-07 14:41:31   Batch 7/10 complete

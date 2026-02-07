@@ -78,6 +78,17 @@ pub trait WalWriter: Send + Sync {
     /// Append an entry to the WAL
     async fn append(&self, entry: WalEntry) -> Result<Lsn>;
 
+    /// Append multiple entries to the WAL with a single sync (group commit)
+    /// Returns the LSN of the last entry
+    async fn append_batch(&self, entries: Vec<WalEntry>) -> Result<Vec<Lsn>> {
+        // Default implementation: append each entry individually
+        let mut lsns = Vec::with_capacity(entries.len());
+        for entry in entries {
+            lsns.push(self.append(entry).await?);
+        }
+        Ok(lsns)
+    }
+
     /// Sync WAL to durable storage
     async fn sync(&self) -> Result<()>;
 

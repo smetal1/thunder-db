@@ -1,0 +1,99 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thunderdb-load-test
+  namespace: thunderdb
+  labels:
+    app: thunderdb-load-test
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: thunderdb-load-test
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: load-test
+          image: saurav7055/benchmark:0.1.0
+          imagePullPolicy: Always
+          env:
+            - name: THUNDERDB_HOST
+              value: "thunderdb"
+            - name: THUNDERDB_PG_PORT
+              value: "5432"
+            - name: THUNDERDB_USER
+              value: "admin"
+            - name: THUNDERDB_PASSWORD
+              value: "thunder123"
+            - name: THUNDERDB_DATABASE
+              value: "default"
+            - name: CONCURRENCY_LEVELS
+              value: "1 2 4 8 16 32"
+            - name: TEST_DURATION
+              value: "60"
+            - name: WARMUP_DURATION
+              value: "5"
+            - name: NUM_SAMPLES
+              value: "500"
+            - name: READ_PERCENTAGE
+              value: "80"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: 2
+              memory: 512Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thunderdb-load-test-quick
+  namespace: thunderdb
+  labels:
+    app: thunderdb-load-test
+    variant: quick
+spec:
+  ttlSecondsAfterFinished: 1800
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: thunderdb-load-test
+        variant: quick
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: load-test
+          image: saurav7055/benchmark:0.1.0
+          imagePullPolicy: Always
+          env:
+            - name: THUNDERDB_HOST
+              value: "thunderdb"
+            - name: THUNDERDB_PG_PORT
+              value: "5432"
+            - name: THUNDERDB_USER
+              value: "admin"
+            - name: THUNDERDB_PASSWORD
+              value: "thunder123"
+            - name: THUNDERDB_DATABASE
+              value: "default"
+            - name: CONCURRENCY_LEVELS
+              value: "1 4 8"
+            - name: TEST_DURATION
+              value: "15"
+            - name: WARMUP_DURATION
+              value: "3"
+            - name: NUM_SAMPLES
+              value: "100"
+            - name: READ_PERCENTAGE
+              value: "80"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 256Mi

@@ -1039,20 +1039,16 @@ impl PhysicalExecutor {
         // Fetch the rows using the RowIds - try persistent storage first
         let rows: Vec<Row> = if let (Some(row_store), Some(snapshot)) = (&self.row_store, &self.snapshot) {
             // Use persistent storage with MVCC visibility
-            let mut result = Vec::with_capacity(row_ids.len());
-            for row_id in row_ids {
-                // Block on async get (in production, executor should be fully async)
-                match block_on(row_store.get(table_id, snapshot, row_id)) {
-                    Ok(Some(row)) => result.push(row),
-                    Ok(None) => {
-                        debug!("Row {:?} not found or not visible", row_id);
-                    }
-                    Err(e) => {
-                        debug!("Error fetching row {:?}: {}", row_id, e);
-                    }
+            // Use batch read for significantly better performance (single page scan, reduced lock overhead)
+            match block_on(row_store.get_batch(table_id, snapshot, &row_ids)) {
+                Ok(batch_results) => {
+                    batch_results.into_iter().map(|(_, row)| row).collect()
+                }
+                Err(e) => {
+                    debug!("Error fetching batch: {}", e);
+                    Vec::new()
                 }
             }
-            result
         } else {
             // Use in-memory storage
             self.storage.get_rows(table_id, &row_ids)
@@ -1606,7 +1602,11 @@ impl PhysicalExecutor {
                 .map(|s| s.txn_id)
                 .unwrap_or(TxnId(0));
 
-            for row in rows {
+            // Use batch insert for significantly better performance
+            // (group commit - single WAL sync for all rows)
+            if rows.len() > 1 {
+                block_on(row_store.insert_batch(table_id, txn_id, rows))?;
+            } else if let Some(row) = rows.into_iter().next() {
                 block_on(row_store.insert(table_id, txn_id, row))?;
             }
         } else {

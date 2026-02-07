@@ -1,0 +1,2 @@
+error: unknown flag: --timeout
+See 'kubectl logs --help' for usage.

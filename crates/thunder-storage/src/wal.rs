@@ -903,6 +903,44 @@ impl super::WalWriter for WalWriterImpl {
         Ok(lsn)
     }
 
+    /// Optimized batch append with group commit - writes all entries then syncs once
+    async fn append_batch(&self, entries: Vec<WalEntry>) -> Result<Vec<Lsn>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut lsns = Vec::with_capacity(entries.len());
+
+        // Write all records to buffer without syncing
+        for entry in entries {
+            let record_type = match &entry.entry_type {
+                WalEntryType::Insert { .. } => WalRecordType::Insert,
+                WalEntryType::Update { .. } => WalRecordType::Update,
+                WalEntryType::Delete { .. } => WalRecordType::Delete,
+                WalEntryType::Commit => WalRecordType::Commit,
+                WalEntryType::Abort => WalRecordType::Abort,
+                WalEntryType::Checkpoint { .. } => WalRecordType::Checkpoint,
+                WalEntryType::CreateTable { .. } => WalRecordType::CreateTable,
+                WalEntryType::DropTable { .. } => WalRecordType::DropTable,
+            };
+
+            let lsn = self.write_record(entry.txn_id, entry.table_id, record_type, &entry.data)?;
+            lsns.push(lsn);
+
+            // For commit/abort, clean up transaction tracking
+            if matches!(entry.entry_type, WalEntryType::Commit | WalEntryType::Abort) {
+                self.remove_txn(entry.txn_id);
+            }
+        }
+
+        // Single sync for entire batch (group commit)
+        if self.sync_commit {
+            self.flush_buffer()?;
+        }
+
+        Ok(lsns)
+    }
+
     async fn sync(&self) -> Result<()> {
         self.flush_buffer()
     }
