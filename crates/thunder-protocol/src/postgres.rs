@@ -1242,7 +1242,11 @@ impl<E: QueryExecutor> PostgresConnection<E> {
     async fn handle_flush(&mut self) -> Result<()> {
         let _length = self.read_i32().await?;
         debug!("Flush");
-        self.flush().await
+        // Flush the underlying stream without re-sending write_buf contents.
+        // write_buf may still hold bytes from the previous send_* call; we must
+        // NOT write them again—only ensure the kernel send buffer is flushed.
+        self.stream.flush().await
+            .map_err(|e| Error::Internal(e.to_string()))
     }
 
     // ========================================================================
@@ -1422,18 +1426,24 @@ impl<E: QueryExecutor> PostgresConnection<E> {
     }
 
     async fn send_error(&mut self, code: &str, message: &str) -> Result<()> {
-        // Calculate length: 4 + severity + code + message + terminator
-        let len = 4 + 1 + 6 + 1 + 1 + code.len() + 1 + 1 + message.len() + 1 + 1;
-
         self.write_buf.clear();
         self.write_buf.put_u8(MSG_ERROR_RESPONSE);
-        self.write_buf.put_i32(len as i32);
+
+        // Reserve 4 bytes for length — we'll fill it after writing the body
+        let length_pos = self.write_buf.len();
+        self.write_buf.put_i32(0); // placeholder
+
+        let body_start = self.write_buf.len();
 
         // Severity
         self.write_buf.put_u8(b'S');
         self.write_buf.put_slice(b"ERROR\0");
 
-        // Code
+        // Severity (non-localized, required by protocol v3.0+)
+        self.write_buf.put_u8(b'V');
+        self.write_buf.put_slice(b"ERROR\0");
+
+        // SQLSTATE code
         self.write_buf.put_u8(b'C');
         self.write_buf.put_slice(code.as_bytes());
         self.write_buf.put_u8(0);
@@ -1445,6 +1455,11 @@ impl<E: QueryExecutor> PostgresConnection<E> {
 
         // Terminator
         self.write_buf.put_u8(0);
+
+        // Patch the length field: includes the 4-byte length itself + body
+        let body_len = self.write_buf.len() - body_start;
+        let total_len = (4 + body_len) as i32;
+        self.write_buf[length_pos..length_pos + 4].copy_from_slice(&total_len.to_be_bytes());
 
         self.flush().await
     }

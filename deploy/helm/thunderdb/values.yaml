@@ -165,3 +165,100 @@ credentials:
   # Use existing secret if already created
   existingSecret: "thunderdb-credentials"
   existingSecretKey: "THUNDERDB_SUPERUSER_PASSWORD_HASH"
+
+# ------------------------------------------------
+# Benchmark configuration (pgbench via K8s Job)
+# Set benchmark.enabled=true to run pgbench after install/upgrade
+# ------------------------------------------------
+benchmark:
+  enabled: false
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+
+  # Scheduling constraints for the benchmark pod
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Log upload configuration (uploads benchmark logs after completion)
+  logUpload:
+    enabled: false
+    # Pre-authenticated request URL (Oracle Object Storage, S3-compatible, etc.)
+    # Must end with '/' — the object name will be appended
+    url: ""
+    # Image used for the upload sidecar container
+    image: "curlimages/curl:latest"
+
+  pgbench:
+    # pgbench client image (postgres:16-alpine includes pgbench + psql, arm64 native)
+    image:
+      repository: postgres
+      tag: "16-alpine"
+      pullPolicy: IfNotPresent
+
+    # Target database (created automatically by pgbench -i)
+    database: "benchmark"
+
+    # Secret key containing the plaintext password (not the hash)
+    passwordSecretKey: "THUNDERDB_SUPERUSER_PASSWORD"
+
+    # -s  Scale factor: row count = scale * 100,000
+    scale: 100
+
+    # -c  Number of concurrent client sessions
+    clients: 10
+
+    # -j  Number of worker threads inside pgbench
+    threads: 2
+
+    # -T  Duration of each benchmark phase in seconds
+    duration: 60
+
+    # -P  Progress report interval in seconds
+    progressInterval: 5
+
+    # --foreign-keys during init
+    foreignKeys: true
+
+    # -b  Built-in scripts to run (select-only, tpcb-like, simple-update)
+    builtinScripts:
+      - select-only
+      - tpcb-like
+      - simple-update
+
+    # Scaling test: run tpcb-like with increasing client counts
+    scalingTest:
+      enabled: true
+      clientCounts:
+        - "1"
+        - "5"
+        - "10"
+        - "20"
+        - "50"
+      duration: 30
+
+    # -f  Custom SQL script (optional). Set to a multi-line SQL string.
+    # Example:
+    #   customScript: |
+    #     \set aid random(1, 100000 * :scale)
+    #     SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+    customScript: ""
+
+    # Resources for the init container
+    initResources:
+      requests:
+        cpu: 500m
+        memory: 256Mi
+      limits:
+        cpu: 2
+        memory: 1Gi
+
+    # Resources for the benchmark runner container
+    resources:
+      requests:
+        cpu: 1
+        memory: 512Mi
+      limits:
+        cpu: 4
+        memory: 2Gi

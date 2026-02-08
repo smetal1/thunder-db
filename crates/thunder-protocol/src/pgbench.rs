@@ -541,10 +541,10 @@ impl CopyCommand {
             return None;
         }
 
-        // Parse table name (and optional columns)
+        // Parse table name (and optional columns), direction, and source
         let mut idx = 1; // Skip "COPY"
         let table_part = parts.get(idx)?;
-        let (table_name, columns) = if table_part.contains('(') {
+        let (table_name, columns, is_from, source) = if table_part.contains('(') {
             // COPY table(col1, col2) FROM ...
             let full: String = parts[idx..].join(" ");
             let paren_start = full.find('(')?;
@@ -555,28 +555,33 @@ impl CopyCommand {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            // Find next part after closing paren
+            // Parse FROM/TO and source from text after closing paren
             let remaining = &full[paren_end + 1..];
-            let _next_parts: Vec<&str> = remaining.split_whitespace().collect();
-            idx = parts.len(); // We've consumed all parts in this case
-            (table, Some(cols))
+            let next_parts: Vec<&str> = remaining.split_whitespace().collect();
+            let direction = next_parts.first()?.to_uppercase();
+            let is_from = direction == "FROM";
+            let source_str = next_parts.get(1)?;
+            let source = match source_str.to_uppercase().as_str() {
+                "STDIN" => CopySource::Stdin,
+                "STDOUT" => CopySource::Stdout,
+                _ => CopySource::File(source_str.trim_matches('\'').to_string()),
+            };
+            (table, Some(cols), is_from, source)
         } else {
             let table = table_part.trim_matches('"').to_string();
             idx += 1;
-            (table, None)
-        };
-
-        // Parse FROM/TO
-        let direction = parts.get(idx)?.to_uppercase();
-        let is_from = direction == "FROM";
-        idx += 1;
-
-        // Parse source
-        let source_str = parts.get(idx)?;
-        let source = match source_str.to_uppercase().as_str() {
-            "STDIN" => CopySource::Stdin,
-            "STDOUT" => CopySource::Stdout,
-            _ => CopySource::File(source_str.trim_matches('\'').to_string()),
+            // Parse FROM/TO
+            let direction = parts.get(idx)?.to_uppercase();
+            let is_from = direction == "FROM";
+            idx += 1;
+            // Parse source
+            let source_str = parts.get(idx)?;
+            let source = match source_str.to_uppercase().as_str() {
+                "STDIN" => CopySource::Stdin,
+                "STDOUT" => CopySource::Stdout,
+                _ => CopySource::File(source_str.trim_matches('\'').to_string()),
+            };
+            (table, None, is_from, source)
         };
 
         // Parse options

@@ -16,57 +16,165 @@ spec:
         benchmark: pgbench
     spec:
       restartPolicy: Never
-      containers:
-        - name: pgbench
-          image: postgres:16-alpine
-          command:
-            - /bin/sh
-            - -c
-            - |
-              apk add --no-cache bc
-              chmod +x /scripts/pgbench.sh
-              /scripts/pgbench.sh
-          env:
-            - name: THUNDERDB_HOST
+      initContainers:
+        # Init container: initialize pgbench tables using the dedicated image
+        - name: pgbench-init
+          image: xridge/pgbench:latest
+          env: &pgbench-env
+            - name: PGHOST
               value: "thunderdb.thunderdb.svc.cluster.local"
-            - name: THUNDERDB_PG_PORT
+            - name: PGPORT
               value: "5432"
-            - name: THUNDERDB_USER
+            - name: PGUSER
               value: "admin"
-            - name: THUNDERDB_PASSWORD
+            - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
                   name: thunderdb-credentials
                   key: THUNDERDB_SUPERUSER_PASSWORD_HASH
                   optional: true
-            - name: THUNDERDB_DATABASE
+            - name: PGDATABASE
               value: "benchmark"
-            - name: REPORT_DIR
-              value: "/reports"
+          command:
+            - pgbench
+          args:
+            - --initialize
+            - --scale=$(PGBENCH_SCALE)
+            - --foreign-keys
+          envFrom: []
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: 2
+              memory: 1Gi
+      containers:
+        - name: pgbench-runner
+          image: xridge/pgbench:latest
+          env:
+            - name: PGHOST
+              value: "thunderdb.thunderdb.svc.cluster.local"
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: "admin"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: thunderdb-credentials
+                  key: THUNDERDB_SUPERUSER_PASSWORD_HASH
+                  optional: true
+            - name: PGDATABASE
+              value: "benchmark"
             - name: PGBENCH_SCALE
-              value: "10"
+              value: "100"
             - name: PGBENCH_CLIENTS
               value: "10"
             - name: PGBENCH_THREADS
               value: "2"
             - name: PGBENCH_DURATION
               value: "60"
-          volumeMounts:
-            - name: scripts
-              mountPath: /scripts
-            - name: reports
-              mountPath: /reports
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              echo "=============================================="
+              echo "ThunderDB pgbench Benchmark"
+              echo "=============================================="
+              echo "Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "Host:     ${PGHOST}:${PGPORT}"
+              echo "Scale:    ${PGBENCH_SCALE}"
+              echo "Clients:  ${PGBENCH_CLIENTS}"
+              echo "Threads:  ${PGBENCH_THREADS}"
+              echo "Duration: ${PGBENCH_DURATION}s"
+              echo "=============================================="
+
+              # -----------------------------------------------
+              # Phase 1: Read-Only (built-in select-only)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 1: READ-ONLY (-b select-only)"
+              pgbench \
+                --builtin=select-only \
+                --client=${PGBENCH_CLIENTS} \
+                --jobs=${PGBENCH_THREADS} \
+                --time=${PGBENCH_DURATION} \
+                --progress=5 \
+                --report-per-command \
+                --log \
+                --log-prefix=/tmp/pgbench_ro
+
+              echo ""
+              echo ">>> Phase 1 complete."
+
+              # -----------------------------------------------
+              # Phase 2: TPC-B-like (default read-write)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 2: TPC-B-like READ-WRITE (-b tpcb-like)"
+              pgbench \
+                --builtin=tpcb-like \
+                --client=${PGBENCH_CLIENTS} \
+                --jobs=${PGBENCH_THREADS} \
+                --time=${PGBENCH_DURATION} \
+                --progress=5 \
+                --report-per-command \
+                --log \
+                --log-prefix=/tmp/pgbench_rw
+
+              echo ""
+              echo ">>> Phase 2 complete."
+
+              # -----------------------------------------------
+              # Phase 3: Simple-Update (write-heavy)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 3: SIMPLE-UPDATE (-b simple-update)"
+              pgbench \
+                --builtin=simple-update \
+                --client=${PGBENCH_CLIENTS} \
+                --jobs=${PGBENCH_THREADS} \
+                --time=${PGBENCH_DURATION} \
+                --progress=5 \
+                --report-per-command \
+                --log \
+                --log-prefix=/tmp/pgbench_wu
+
+              echo ""
+              echo ">>> Phase 3 complete."
+
+              # -----------------------------------------------
+              # Phase 4: Scaling test (increasing clients)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 4: SCALING TEST (1, 5, 10, 20, 50 clients)"
+              for C in 1 5 10 20 50; do
+                J=$C
+                [ $J -gt ${PGBENCH_THREADS} ] && J=${PGBENCH_THREADS}
+                echo ""
+                echo "--- clients=$C, threads=$J, duration=30s ---"
+                pgbench \
+                  --builtin=tpcb-like \
+                  --client=$C \
+                  --jobs=$J \
+                  --time=30 \
+                  --progress=10
+              done
+
+              echo ""
+              echo ">>> Phase 4 complete."
+
+              echo ""
+              echo "=============================================="
+              echo "ALL PHASES COMPLETE"
+              echo "=============================================="
           resources:
             requests:
-              cpu: 500m
+              cpu: 1
               memory: 512Mi
             limits:
-              cpu: 2
-              memory: 1Gi
-      volumes:
-        - name: scripts
-          configMap:
-            name: thunderdb-benchmark-scripts
-            defaultMode: 0755
-        - name: reports
-          emptyDir: {}
+              cpu: 4
+              memory: 2Gi

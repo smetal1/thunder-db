@@ -1,0 +1,292 @@
+{{- if .Values.benchmark.enabled }}
+{{- if .Values.benchmark.pgbench.customScript }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "thunderdb.fullname" . }}-pgbench-scripts
+  labels:
+    {{- include "thunderdb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: benchmark
+data:
+  custom.sql: |
+    {{- .Values.benchmark.pgbench.customScript | nindent 4 }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "thunderdb.fullname" . }}-pgbench
+  labels:
+    {{- include "thunderdb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: benchmark
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: {{ .Values.benchmark.ttlSecondsAfterFinished | default 3600 }}
+  backoffLimit: {{ .Values.benchmark.backoffLimit | default 2 }}
+  activeDeadlineSeconds: {{ .Values.benchmark.activeDeadlineSeconds | default 7200 }}
+  template:
+    metadata:
+      labels:
+        {{- include "thunderdb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: benchmark
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.benchmark.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.benchmark.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.benchmark.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Create pgbench tables manually (ThunderDB does not support WITH clause)
+        # then populate via pgbench --init-steps=Gvp (server-side INSERT, no COPY)
+        - name: pgbench-init
+          image: "{{ .Values.benchmark.pgbench.image.repository }}:{{ .Values.benchmark.pgbench.image.tag }}"
+          imagePullPolicy: {{ .Values.benchmark.pgbench.image.pullPolicy | default "IfNotPresent" }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "=== Dropping leftover pgbench tables ==="
+              for t in pgbench_history pgbench_tellers pgbench_accounts pgbench_branches; do
+                psql -c "DROP TABLE IF EXISTS $t;" 2>/dev/null || true
+              done
+
+              echo "=== Creating pgbench tables (no WITH clause) ==="
+              # Use individual psql -c calls so each DROP/CREATE is on its own connection,
+              # and use IF NOT EXISTS to handle races with WAL recovery.
+              psql -c "CREATE TABLE IF NOT EXISTS pgbench_branches (bid INT NOT NULL, bbalance INT, filler CHAR(88));"
+              psql -c "CREATE TABLE IF NOT EXISTS pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84));"
+              psql -c "CREATE TABLE IF NOT EXISTS pgbench_accounts (aid INT NOT NULL, bid INT, abalance INT, filler CHAR(84));"
+              psql -c "CREATE TABLE IF NOT EXISTS pgbench_history (tid INT, bid INT, aid INT, delta INT, mtime TIMESTAMP, filler CHAR(22));"
+
+              echo "=== Populating data (scale={{ .Values.benchmark.pgbench.scale }}, server-side INSERT) ==="
+              pgbench --initialize \
+                --init-steps=Gvp \
+                --scale={{ .Values.benchmark.pgbench.scale }}
+              echo "=== Init complete ==="
+          env: &pgbench-env
+            - name: PGHOST
+              value: {{ include "thunderdb.fullname" . }}
+            - name: PGPORT
+              value: {{ .Values.service.ports.postgres | quote }}
+            - name: PGUSER
+              value: {{ .Values.config.security.superuser | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thunderdb.secretName" . }}
+                  key: {{ .Values.benchmark.pgbench.passwordSecretKey | default "THUNDERDB_SUPERUSER_PASSWORD" }}
+                  optional: true
+            - name: PGDATABASE
+              value: {{ .Values.benchmark.pgbench.database | quote }}
+          resources:
+            {{- toYaml .Values.benchmark.pgbench.initResources | nindent 12 }}
+      containers:
+        - name: pgbench-runner
+          image: "{{ .Values.benchmark.pgbench.image.repository }}:{{ .Values.benchmark.pgbench.image.tag }}"
+          imagePullPolicy: {{ .Values.benchmark.pgbench.image.pullPolicy | default "IfNotPresent" }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              LOGFILE="/reports/pgbench_$(date -u +%Y%m%d_%H%M%S).log"
+              mkdir -p /reports
+
+              # Tee everything to the log file
+              exec > >(tee -a "$LOGFILE") 2>&1
+
+              echo "=============================================="
+              echo "ThunderDB pgbench Benchmark"
+              echo "=============================================="
+              echo "Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "Host:     ${PGHOST}:${PGPORT}"
+              echo "Scale:    {{ .Values.benchmark.pgbench.scale }}"
+              echo "Clients:  {{ .Values.benchmark.pgbench.clients }}"
+              echo "Threads:  {{ .Values.benchmark.pgbench.threads }}"
+              echo "Duration: {{ .Values.benchmark.pgbench.duration }}s"
+              echo "Image:    {{ .Values.benchmark.pgbench.image.repository }}:{{ .Values.benchmark.pgbench.image.tag }}"
+              echo "=============================================="
+
+              CLIENTS={{ .Values.benchmark.pgbench.clients }}
+              THREADS={{ .Values.benchmark.pgbench.threads }}
+              DURATION={{ .Values.benchmark.pgbench.duration }}
+
+              {{- if has "select-only" .Values.benchmark.pgbench.builtinScripts }}
+
+              # -----------------------------------------------
+              # Read-Only (-b select-only)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 1: READ-ONLY (-b select-only)"
+              pgbench \
+                --builtin=select-only \
+                --client=$CLIENTS \
+                --jobs=$THREADS \
+                --time=$DURATION \
+                --progress={{ .Values.benchmark.pgbench.progressInterval }} \
+                --report-per-command
+              echo ">>> Phase 1 complete."
+              {{- end }}
+
+              {{- if has "tpcb-like" .Values.benchmark.pgbench.builtinScripts }}
+
+              # -----------------------------------------------
+              # TPC-B-like Read-Write (-b tpcb-like)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 2: TPC-B-like READ-WRITE (-b tpcb-like)"
+              pgbench \
+                --builtin=tpcb-like \
+                --client=$CLIENTS \
+                --jobs=$THREADS \
+                --time=$DURATION \
+                --progress={{ .Values.benchmark.pgbench.progressInterval }} \
+                --report-per-command
+              echo ">>> Phase 2 complete."
+              {{- end }}
+
+              {{- if has "simple-update" .Values.benchmark.pgbench.builtinScripts }}
+
+              # -----------------------------------------------
+              # Simple-Update (-b simple-update)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 3: SIMPLE-UPDATE (-b simple-update)"
+              pgbench \
+                --builtin=simple-update \
+                --client=$CLIENTS \
+                --jobs=$THREADS \
+                --time=$DURATION \
+                --progress={{ .Values.benchmark.pgbench.progressInterval }} \
+                --report-per-command
+              echo ">>> Phase 3 complete."
+              {{- end }}
+
+              {{- if .Values.benchmark.pgbench.scalingTest.enabled }}
+
+              # -----------------------------------------------
+              # Scaling test (increasing clients)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 4: SCALING TEST"
+              for C in {{ join " " .Values.benchmark.pgbench.scalingTest.clientCounts }}; do
+                J=$C
+                [ $J -gt $THREADS ] && J=$THREADS
+                echo ""
+                echo "--- clients=$C, threads=$J, duration={{ .Values.benchmark.pgbench.scalingTest.duration }}s ---"
+                pgbench \
+                  --builtin=tpcb-like \
+                  --client=$C \
+                  --jobs=$J \
+                  --time={{ .Values.benchmark.pgbench.scalingTest.duration }} \
+                  --progress=10
+              done
+              echo ">>> Phase 4 complete."
+              {{- end }}
+
+              {{- if .Values.benchmark.pgbench.customScript }}
+
+              # -----------------------------------------------
+              # Custom script (-f)
+              # -----------------------------------------------
+              echo ""
+              echo ">>> Phase 5: CUSTOM SCRIPT (-f /scripts/custom.sql)"
+              pgbench \
+                -f /scripts/custom.sql \
+                --client=$CLIENTS \
+                --jobs=$THREADS \
+                --time=$DURATION \
+                --progress={{ .Values.benchmark.pgbench.progressInterval }} \
+                --report-per-command
+              echo ">>> Phase 5 complete."
+              {{- end }}
+
+              echo ""
+              echo "=============================================="
+              echo "ALL PHASES COMPLETE"
+              echo "=============================================="
+
+              # Signal log-uploader that benchmark is done
+              touch /reports/DONE
+          env: *pgbench-env
+          volumeMounts:
+            - name: reports
+              mountPath: /reports
+            {{- if .Values.benchmark.pgbench.customScript }}
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.benchmark.pgbench.resources | nindent 12 }}
+        {{- if .Values.benchmark.logUpload.enabled }}
+        # Sidecar: wait for benchmark to finish, then upload logs
+        - name: log-uploader
+          image: {{ .Values.benchmark.logUpload.image | default "curlimages/curl:latest" }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for benchmark to complete..."
+              while [ ! -f /reports/DONE ]; do
+                sleep 5
+              done
+              echo "Benchmark finished. Uploading logs..."
+
+              TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+              for f in /reports/*.log; do
+                [ -f "$f" ] || continue
+                FILENAME=$(basename "$f")
+                OBJECT_NAME="${TIMESTAMP}_${FILENAME}"
+                UPLOAD_URL="{{ .Values.benchmark.logUpload.url }}${OBJECT_NAME}"
+                echo "Uploading $FILENAME -> $UPLOAD_URL"
+                curl -X PUT \
+                  -T "$f" \
+                  -H "Content-Type: text/plain" \
+                  --retry 3 \
+                  --retry-delay 5 \
+                  -w "\nHTTP Status: %{http_code}\n" \
+                  "$UPLOAD_URL"
+              done
+              echo "Upload complete."
+          volumeMounts:
+            - name: reports
+              mountPath: /reports
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+        {{- end }}
+      volumes:
+        - name: reports
+          emptyDir: {}
+        {{- if .Values.benchmark.pgbench.customScript }}
+        - name: scripts
+          configMap:
+            name: {{ include "thunderdb.fullname" . }}-pgbench-scripts
+            defaultMode: 0755
+        {{- end }}
+{{- end }}

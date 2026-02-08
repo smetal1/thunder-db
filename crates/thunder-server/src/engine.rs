@@ -909,7 +909,16 @@ impl DatabaseEngine {
 
             // Intercept system catalog queries (information_schema / thunderdb)
             let stmt_lower = stmt.to_string().to_lowercase();
-            if let Some(result) = self.try_execute_system_catalog(&stmt_lower, session_id)? {
+            let catalog_result = match self.try_execute_system_catalog(&stmt_lower, session_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    if auto_commit {
+                        let _ = self.txn_manager.abort(txn_id).await;
+                    }
+                    return Err(e);
+                }
+            };
+            if let Some(result) = catalog_result {
                 final_result = result;
                 continue;
             }
@@ -936,39 +945,61 @@ impl DatabaseEngine {
                         }
                         return self.forward_query_to_node(owner_node, sql).await;
                     }
+                    if auto_commit {
+                        let _ = self.txn_manager.abort(txn_id).await;
+                    }
                     return Err(Error::Sql(SqlError::TableNotFound(table_name.clone())));
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if auto_commit {
+                        let _ = self.txn_manager.abort(txn_id).await;
+                    }
+                    return Err(e);
+                }
             };
 
             // Handle DDL and special statements
+            // DDL errors must abort any auto-commit transaction before returning.
+            macro_rules! ddl_try {
+                ($expr:expr) => {
+                    match $expr {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if auto_commit {
+                                let _ = self.txn_manager.abort(txn_id).await;
+                            }
+                            return Err(e);
+                        }
+                    }
+                };
+            }
             match &logical_plan {
                 LogicalPlan::CreateTable { name, columns, if_not_exists } => {
-                    final_result = self.execute_create_table(name, columns, *if_not_exists)?;
+                    final_result = ddl_try!(self.execute_create_table(name, columns, *if_not_exists));
                     continue;
                 }
                 LogicalPlan::DropTable { name, if_exists } => {
-                    final_result = self.execute_drop_table(name, *if_exists)?;
+                    final_result = ddl_try!(self.execute_drop_table(name, *if_exists));
                     continue;
                 }
                 LogicalPlan::CreateIndex { name, table, columns, unique, if_not_exists } => {
-                    final_result = self.execute_create_index(name, table, columns, *unique, *if_not_exists)?;
+                    final_result = ddl_try!(self.execute_create_index(name, table, columns, *unique, *if_not_exists));
                     continue;
                 }
                 LogicalPlan::DropIndex { name, if_exists } => {
-                    final_result = self.execute_drop_index(name, *if_exists)?;
+                    final_result = ddl_try!(self.execute_drop_index(name, *if_exists));
                     continue;
                 }
                 LogicalPlan::AlterTable { table, operations } => {
-                    final_result = self.execute_alter_table(table, operations)?;
+                    final_result = ddl_try!(self.execute_alter_table(table, operations));
                     continue;
                 }
                 LogicalPlan::Explain { plan, analyze, verbose } => {
-                    final_result = self.execute_explain(plan, *analyze, *verbose, txn_id).await?;
+                    final_result = ddl_try!(self.execute_explain(plan, *analyze, *verbose, txn_id).await);
                     continue;
                 }
                 LogicalPlan::AnalyzeTable { table } => {
-                    final_result = self.execute_analyze_table(table.as_deref()).await?;
+                    final_result = ddl_try!(self.execute_analyze_table(table.as_deref()).await);
                     continue;
                 }
                 _ => {}
@@ -1012,13 +1043,13 @@ impl DatabaseEngine {
             // Foreign key constraint checks for DML operations
             match &logical_plan {
                 LogicalPlan::Insert { table, columns, values } => {
-                    self.check_fk_on_insert(table, columns, values)?;
+                    ddl_try!(self.check_fk_on_insert(table, columns, values));
                 }
                 LogicalPlan::Delete { table, filter } => {
-                    self.check_fk_on_delete(table, filter, txn_id)?;
+                    ddl_try!(self.check_fk_on_delete(table, filter, txn_id));
                 }
                 LogicalPlan::Update { table, assignments, .. } => {
-                    self.check_fk_on_update(table, assignments)?;
+                    ddl_try!(self.check_fk_on_update(table, assignments));
                 }
                 _ => {}
             }
@@ -1054,27 +1085,32 @@ impl DatabaseEngine {
                     debug!("Plan cache hit for query");
                     (*cached_plan).clone()
                 } else {
-                    let optimized_plan = self.optimizer.optimize(logical_plan)?;
-                    let plan = self.planner.plan(optimized_plan)?;
+                    let optimized_plan = ddl_try!(self.optimizer.optimize(logical_plan));
+                    let plan = ddl_try!(self.planner.plan(optimized_plan));
                     self.plan_cache.lock().push(hash, Arc::new(plan.clone()));
                     plan
                 }
             } else {
                 // DML/DDL: optimize and plan without caching
-                let optimized_plan = self.optimizer.optimize(logical_plan)?;
-                self.planner.plan(optimized_plan)?
+                let optimized_plan = ddl_try!(self.optimizer.optimize(logical_plan));
+                ddl_try!(self.planner.plan(optimized_plan))
             };
 
             // Execute physical plan
-            final_result = self.execute_physical_plan(txn_id, physical_plan).await?;
+            final_result = ddl_try!(self.execute_physical_plan(txn_id, physical_plan).await);
         }
 
         // Auto-commit if needed
         if auto_commit {
-            match self.txn_manager.commit(txn_id).await? {
-                CommitResult::Committed { .. } => {}
-                CommitResult::Aborted { reason } => {
+            match self.txn_manager.commit(txn_id).await {
+                Ok(CommitResult::Committed { .. }) => {}
+                Ok(CommitResult::Aborted { reason }) => {
                     return Err(Error::Internal(format!("Transaction aborted: {:?}", reason)));
+                }
+                Err(e) => {
+                    // Commit failed — try to abort to prevent leak
+                    let _ = self.txn_manager.abort(txn_id).await;
+                    return Err(e);
                 }
             }
         }

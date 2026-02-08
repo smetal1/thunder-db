@@ -7,88 +7,186 @@ metadata:
     app: thunderdb-benchmark
 data:
   pgbench.sh: |
-    #!/bin/bash
+    #!/bin/sh
+    # =============================================================
+    # ThunderDB pgbench Benchmark Script
+    # Uses xridge/pgbench (client-only, no server bundled)
+    #
+    # Key pgbench options used:
+    #   -i            Initialize the database with pgbench tables
+    #   -s SCALE      Scale factor (number of rows = scale * 100000)
+    #   -c CLIENTS    Number of concurrent database sessions
+    #   -j THREADS    Number of worker threads within pgbench
+    #   -T DURATION   Run the test for this many seconds
+    #   -b BUILTIN    Use a built-in script (tpcb-like, select-only, simple-update)
+    #   -f FILE       Read a custom transaction script from a file
+    #   -P SECS       Show progress report every SECS seconds
+    #   -r            Report per-statement latencies
+    #   --log         Write per-transaction log to file
+    # =============================================================
     set -e
 
-    HOST="${THUNDERDB_HOST:-thunderdb.thunderdb.svc.cluster.local}"
-    PORT="${THUNDERDB_PG_PORT:-5432}"
-    USER="${THUNDERDB_USER:-admin}"
-    PASSWORD="${THUNDERDB_PASSWORD:-}"
-    DATABASE="${THUNDERDB_DATABASE:-benchmark}"
-    REPORT_DIR="${REPORT_DIR:-/reports}"
-    SCALE="${PGBENCH_SCALE:-10}"
+    # ---- Connection parameters (libpq env vars) ----
+    # PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE are set in the pod env
+
+    HOST="${PGHOST:-thunderdb.thunderdb.svc.cluster.local}"
+    PORT="${PGPORT:-5432}"
+    USER="${PGUSER:-admin}"
+    DATABASE="${PGDATABASE:-benchmark}"
+
+    # ---- Benchmark tunables ----
+    SCALE="${PGBENCH_SCALE:-100}"
     CLIENTS="${PGBENCH_CLIENTS:-10}"
     THREADS="${PGBENCH_THREADS:-2}"
     DURATION="${PGBENCH_DURATION:-60}"
+    REPORT_DIR="${REPORT_DIR:-/reports}"
 
-    export PGPASSWORD="$PASSWORD"
+    mkdir -p "$REPORT_DIR"
 
-    REPORT_FILE="${REPORT_DIR}/pgbench_report_$(date +%Y%m%d_%H%M%S).txt"
-    JSON_REPORT="${REPORT_DIR}/pgbench_report_$(date +%Y%m%d_%H%M%S).json"
+    TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
+    REPORT_FILE="${REPORT_DIR}/pgbench_report_${TIMESTAMP}.txt"
+    JSON_REPORT="${REPORT_DIR}/pgbench_report_${TIMESTAMP}.json"
 
-    echo "Starting PostgreSQL Protocol Benchmark"
-    echo "Target: $HOST:$PORT"
+    log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$REPORT_FILE"; }
 
+    # ---- Header ----
     {
-        echo "=============================================="
-        echo "ThunderDB PostgreSQL Protocol Benchmark Report"
-        echo "=============================================="
-        echo "Date: $(date)"
-        echo "Host: $HOST:$PORT"
-        echo "Scale Factor: $SCALE"
-        echo "Clients: $CLIENTS"
-        echo "Duration: ${DURATION}s"
-        echo "=============================================="
+      echo "=============================================="
+      echo "ThunderDB pgbench Benchmark Report"
+      echo "=============================================="
+      echo "Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "Host:     ${HOST}:${PORT}"
+      echo "Scale:    ${SCALE}"
+      echo "Clients:  ${CLIENTS}"
+      echo "Threads:  ${THREADS}"
+      echo "Duration: ${DURATION}s"
+      echo "Image:    xridge/pgbench"
+      echo "=============================================="
     } > "$REPORT_FILE"
 
-    # Wait for ThunderDB to be ready
-    until pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5; do
-        echo "Waiting for ThunderDB..."
-        sleep 2
+    # ---- Phase 0: Initialize ----
+    log ">>> Phase 0: INITIALIZE (pgbench -i -s ${SCALE})"
+    INIT_START=$(date +%s)
+    pgbench -i -s "$SCALE" 2>&1 | tee -a "$REPORT_FILE"
+    INIT_END=$(date +%s)
+    INIT_TIME=$((INIT_END - INIT_START))
+    log ">>> Initialization completed in ${INIT_TIME}s"
+
+    # ---- Phase 1: Read-Only ----
+    log ""
+    log ">>> Phase 1: READ-ONLY (-b select-only)"
+    RO_OUTPUT=$(pgbench \
+      -b select-only \
+      -c "$CLIENTS" \
+      -j "$THREADS" \
+      -T "$DURATION" \
+      -P 5 \
+      -r 2>&1)
+    echo "$RO_OUTPUT" | tee -a "$REPORT_FILE"
+    RO_TPS=$(echo "$RO_OUTPUT" | grep "excluding connections establishing" | awk '{print $3}')
+    RO_LATENCY=$(echo "$RO_OUTPUT" | grep "latency average" | awk '{print $4}')
+    log ">>> Read-Only TPS: ${RO_TPS:-N/A}, Avg Latency: ${RO_LATENCY:-N/A} ms"
+
+    # ---- Phase 2: TPC-B-like Read-Write ----
+    log ""
+    log ">>> Phase 2: TPC-B-like READ-WRITE (-b tpcb-like)"
+    RW_OUTPUT=$(pgbench \
+      -b tpcb-like \
+      -c "$CLIENTS" \
+      -j "$THREADS" \
+      -T "$DURATION" \
+      -P 5 \
+      -r 2>&1)
+    echo "$RW_OUTPUT" | tee -a "$REPORT_FILE"
+    RW_TPS=$(echo "$RW_OUTPUT" | grep "excluding connections establishing" | awk '{print $3}')
+    RW_LATENCY=$(echo "$RW_OUTPUT" | grep "latency average" | awk '{print $4}')
+    log ">>> Read-Write TPS: ${RW_TPS:-N/A}, Avg Latency: ${RW_LATENCY:-N/A} ms"
+
+    # ---- Phase 3: Simple-Update (write-heavy) ----
+    log ""
+    log ">>> Phase 3: SIMPLE-UPDATE (-b simple-update)"
+    WU_OUTPUT=$(pgbench \
+      -b simple-update \
+      -c "$CLIENTS" \
+      -j "$THREADS" \
+      -T "$DURATION" \
+      -P 5 \
+      -r 2>&1)
+    echo "$WU_OUTPUT" | tee -a "$REPORT_FILE"
+    WU_TPS=$(echo "$WU_OUTPUT" | grep "excluding connections establishing" | awk '{print $3}')
+    WU_LATENCY=$(echo "$WU_OUTPUT" | grep "latency average" | awk '{print $4}')
+    log ">>> Simple-Update TPS: ${WU_TPS:-N/A}, Avg Latency: ${WU_LATENCY:-N/A} ms"
+
+    # ---- Phase 4: Scaling test ----
+    log ""
+    log ">>> Phase 4: SCALING TEST (vary clients: 1, 5, 10, 20, 50)"
+    SCALE_RESULTS=""
+    for C in 1 5 10 20 50; do
+      J=$C
+      [ $J -gt "$THREADS" ] && J=$THREADS
+      SCALE_OUT=$(pgbench \
+        -b tpcb-like \
+        -c $C \
+        -j $J \
+        -T 30 \
+        -P 10 2>&1)
+      S_TPS=$(echo "$SCALE_OUT" | grep "excluding connections establishing" | awk '{print $3}')
+      S_LAT=$(echo "$SCALE_OUT" | grep "latency average" | awk '{print $4}')
+      log "  clients=$C  threads=$J  TPS=${S_TPS:-N/A}  latency=${S_LAT:-N/A}ms"
+      SCALE_RESULTS="${SCALE_RESULTS}{\"clients\":$C,\"tps\":${S_TPS:-0},\"latency_ms\":${S_LAT:-0}},"
     done
 
-    # Setup database
-    psql -h "$HOST" -p "$PORT" -U "$USER" -c "DROP DATABASE IF EXISTS $DATABASE;" 2>/dev/null || true
-    psql -h "$HOST" -p "$PORT" -U "$USER" -c "CREATE DATABASE $DATABASE;" 2>/dev/null || true
+    # ---- Phase 5: Custom script (if mounted) ----
+    if [ -f /scripts/custom.sql ]; then
+      log ""
+      log ">>> Phase 5: CUSTOM SCRIPT (-f /scripts/custom.sql)"
+      CUSTOM_OUTPUT=$(pgbench \
+        -f /scripts/custom.sql \
+        -c "$CLIENTS" \
+        -j "$THREADS" \
+        -T "$DURATION" \
+        -P 5 \
+        -r 2>&1)
+      echo "$CUSTOM_OUTPUT" | tee -a "$REPORT_FILE"
+      CUSTOM_TPS=$(echo "$CUSTOM_OUTPUT" | grep "excluding connections establishing" | awk '{print $3}')
+    fi
 
-    # Initialize
-    INIT_START=$(date +%s.%N)
-    pgbench -h "$HOST" -p "$PORT" -U "$USER" -i -s "$SCALE" "$DATABASE" 2>&1 | tee -a "$REPORT_FILE"
-    INIT_END=$(date +%s.%N)
-    INIT_TIME=$(echo "$INIT_END - $INIT_START" | bc)
-
-    # Read-only
-    echo "Running READ-ONLY benchmark..." | tee -a "$REPORT_FILE"
-    READ_RESULT=$(pgbench -h "$HOST" -p "$PORT" -U "$USER" -S -c "$CLIENTS" -j "$THREADS" -T "$DURATION" -P 5 "$DATABASE" 2>&1)
-    echo "$READ_RESULT" >> "$REPORT_FILE"
-    READ_TPS=$(echo "$READ_RESULT" | grep "tps = " | tail -1 | awk '{print $3}')
-
-    # Read-write
-    echo "Running READ-WRITE benchmark..." | tee -a "$REPORT_FILE"
-    RW_RESULT=$(pgbench -h "$HOST" -p "$PORT" -U "$USER" -c "$CLIENTS" -j "$THREADS" -T "$DURATION" -P 5 "$DATABASE" 2>&1)
-    echo "$RW_RESULT" >> "$REPORT_FILE"
-    RW_TPS=$(echo "$RW_RESULT" | grep "tps = " | tail -1 | awk '{print $3}')
-
-    # JSON report
-    cat > "$JSON_REPORT" <<EOF
+    # ---- JSON Report ----
+    cat > "$JSON_REPORT" <<ENDJSON
     {
-        "benchmark": "pgbench",
-        "protocol": "postgresql",
-        "timestamp": "$(date -Iseconds)",
-        "results": {
-            "init_time": $INIT_TIME,
-            "read_only_tps": ${READ_TPS:-0},
-            "read_write_tps": ${RW_TPS:-0}
-        }
+      "benchmark": "pgbench",
+      "image": "xridge/pgbench",
+      "protocol": "postgresql",
+      "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+      "config": {
+        "host": "${HOST}",
+        "port": ${PORT},
+        "scale": ${SCALE},
+        "clients": ${CLIENTS},
+        "threads": ${THREADS},
+        "duration_secs": ${DURATION}
+      },
+      "results": {
+        "init_time_secs": ${INIT_TIME},
+        "read_only": {"tps": ${RO_TPS:-0}, "avg_latency_ms": ${RO_LATENCY:-0}},
+        "read_write": {"tps": ${RW_TPS:-0}, "avg_latency_ms": ${RW_LATENCY:-0}},
+        "simple_update": {"tps": ${WU_TPS:-0}, "avg_latency_ms": ${WU_LATENCY:-0}},
+        "scaling": [${SCALE_RESULTS%,}]
+      }
     }
-    EOF
+    ENDJSON
 
-    echo "=============================================="
-    echo "SUMMARY"
-    echo "Read-Only TPS: ${READ_TPS:-N/A}"
-    echo "Read-Write TPS: ${RW_TPS:-N/A}"
-    echo "=============================================="
-    cat "$REPORT_FILE"
+    # ---- Summary ----
+    log ""
+    log "=============================================="
+    log "SUMMARY"
+    log "----------------------------------------------"
+    log "Init Time:         ${INIT_TIME}s"
+    log "Read-Only TPS:     ${RO_TPS:-N/A}  (latency ${RO_LATENCY:-N/A} ms)"
+    log "Read-Write TPS:    ${RW_TPS:-N/A}  (latency ${RW_LATENCY:-N/A} ms)"
+    log "Simple-Update TPS: ${WU_TPS:-N/A}  (latency ${WU_LATENCY:-N/A} ms)"
+    log "=============================================="
+
     cat "$JSON_REPORT"
 
   redis-benchmark.sh: |

@@ -1,0 +1,70 @@
+# Benchmark-optimized values override
+# Usage:
+#   helm upgrade thunderdb ./deploy/helm/thunderdb -n thunderdb \
+#     -f ./deploy/helm/thunderdb/values-benchmark.yaml
+#
+# This enables the pgbench K8s Job (xridge/pgbench) with log upload
+# to Oracle Object Storage.
+
+# Enable the pgbench benchmark Job
+benchmark:
+  enabled: true
+
+  # Upload benchmark logs to Oracle Object Storage
+  logUpload:
+    enabled: true
+    url: "https://objectstorage.us-chicago-1.oraclecloud.com/p/lSqjbYATcLIUbliJQqELSBXxf4cgX01y2wFQ-V1IY3C_VqoADjG-j-e3M8g1RVCK/n/siebeldev/b/my-dataset/o/"
+    image: "curlimages/curl:latest"
+
+  pgbench:
+    # postgres:16-alpine includes pgbench + psql, supports arm64 natively,
+    # and has --init-steps=dtGvp for INSERT-based init (avoids COPY FROM STDIN)
+    image:
+      repository: postgres
+      tag: "16-alpine"
+
+    # Scale factor 10 = 1M rows in pgbench_accounts (faster init)
+    scale: 10
+
+    # 10 concurrent clients
+    clients: 10
+
+    # Worker threads
+    threads: 2
+
+    # 60 seconds per phase
+    duration: 60
+
+    progressInterval: 5
+    foreignKeys: false
+
+    builtinScripts:
+      - select-only
+      - tpcb-like
+      - simple-update
+
+    scalingTest:
+      enabled: true
+      clientCounts:
+        - "1"
+        - "5"
+        - "10"
+        - "20"
+        - "50"
+      duration: 30
+
+    initResources:
+      requests:
+        cpu: 500m
+        memory: 256Mi
+      limits:
+        cpu: 2
+        memory: 1Gi
+
+    resources:
+      requests:
+        cpu: 1
+        memory: 512Mi
+      limits:
+        cpu: 4
+        memory: 2Gi
