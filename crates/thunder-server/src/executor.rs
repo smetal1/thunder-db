@@ -11,7 +11,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::executor::block_on;
+/// Run an async future from synchronous code within a tokio runtime.
+///
+/// Uses `block_in_place` to tell tokio to move other tasks off this thread,
+/// then drives the future on the current runtime. This is necessary because
+/// `futures::executor::block_on` cannot drive tokio primitives (timers,
+/// Notify, tokio I/O) which causes deadlocks when the WAL uses group commit.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(f)
+    })
+}
 use parking_lot::RwLock;
 use tracing::debug;
 

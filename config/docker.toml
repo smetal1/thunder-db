@@ -47,6 +47,10 @@ superuser = "admin"
 # In Docker, set THUNDERDB_SUPERUSER_PASSWORD_HASH env var instead of plaintext.
 # Generate with: thunderdb --hash-password "your-secure-password"
 superuser_password = "changeme"
+require_password_change = false
+min_password_length = 8
+max_login_attempts = 5
+lockout_duration_secs = 300
 
 # Logging configuration
 [logging]
