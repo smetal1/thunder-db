@@ -7,13 +7,17 @@
 //! - Distributed transaction coordination
 //! - Gossip-based peer discovery (Cassandra-style)
 
+pub mod catalog_sync;
 pub mod coordinator;
+pub mod deadlock;
 pub mod generated;
 pub mod gossip;
 pub mod membership;
 pub mod raft_node;
 pub mod region;
 pub mod replication;
+pub mod scatter_gather;
+pub mod topology;
 pub mod transport;
 
 use async_trait::async_trait;
@@ -59,6 +63,20 @@ pub use replication::{
     ReplicationMessage, ReplicationReceiver, ReplicationStatus, ReplicatorConfig,
     WalReplicator, WalShipmentEntry,
 };
+
+// Re-exports from topology
+pub use topology::{GridTopology, HashRing, ShardConfig, TableShard, TableShardMap};
+
+// Re-exports from catalog_sync
+pub use catalog_sync::{
+    DistributedCatalog, DistributedTableEntry, Distribution, ForwardedQueryResult, QueryExecutor,
+};
+
+// Re-exports from scatter_gather
+pub use scatter_gather::{DistributionPlan, MergedResult, PartialResult, ScatterGatherCoordinator};
+
+// Re-exports from deadlock
+pub use deadlock::{DeadlockCycle, DistributedDeadlockDetector, WaitForEdge};
 
 /// Cluster manager trait
 #[async_trait]

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use clap::Parser;
 use thunder_api::AppState;
 use thunder_cluster::{
-    ClusterCoordinator, CoordinatorConfig, GossipConfig, GrpcTransport, TransportConfig,
+    ClusterCoordinator, CoordinatorConfig, DistributedCatalog, GossipConfig, GrpcTransport,
+    TransportConfig,
 };
 use thunder_common::config::ServerConfig;
 use thunder_common::prelude::NodeId;
@@ -335,6 +336,60 @@ async fn main() -> anyhow::Result<()> {
             info!("Running in standalone mode (no cluster configured)");
             None
         };
+
+    // Wire cluster coordinator and distributed catalog to engine
+    if let Some(ref coordinator) = cluster_coordinator {
+        if let Some(dist_catalog) = coordinator.distributed_catalog() {
+            info!("Wiring distributed catalog to engine");
+            engine.set_cluster(coordinator.clone(), dist_catalog.clone());
+
+            // Register existing local tables in the distributed catalog
+            // (tables recovered from WAL are already in sql_catalog)
+        }
+    }
+
+    // Start gRPC server for cluster communication if cluster is enabled
+    if let Some(ref coordinator) = cluster_coordinator {
+        let grpc_addr: SocketAddr = format!("{}:{}", config.listen_addr, config.grpc_port)
+            .parse()
+            .expect("Invalid gRPC address");
+
+        info!("Starting cluster gRPC server on {}", grpc_addr);
+
+        // Build ClusterServer with engine for forwarded queries
+        let engine_for_grpc: Arc<dyn thunder_cluster::QueryExecutor> = engine.clone();
+        let cluster_transport = thunder_cluster::ClusterTransport::new(
+            coordinator.node_id(),
+            grpc_addr,
+            config.cluster.cluster_name.clone(),
+            TransportConfig::default(),
+        );
+        let transport_arc = Arc::new(cluster_transport);
+        let mut cluster_server = thunder_cluster::ClusterServer::new(
+            coordinator.node_id(),
+            config.cluster.cluster_name.clone(),
+            transport_arc.get_raft_sender(),
+            None,
+            transport_arc,
+        );
+        cluster_server.set_engine(engine_for_grpc);
+
+        // Spawn gRPC server
+        let svc = thunder_cluster::generated::cluster_service_server::ClusterServiceServer::new(
+            cluster_server,
+        );
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve(grpc_addr)
+                .await
+            {
+                tracing::error!("gRPC cluster server failed: {}", e);
+            }
+        });
+
+        info!("Cluster gRPC server started");
+    }
 
     // Build addresses
     let pg_addr = format!("{}:{}", config.listen_addr, config.pg_port);

@@ -21,6 +21,12 @@ service ClusterService {
 
     // Health check
     rpc HealthCheck(HealthRequest) returns (HealthResponse);
+
+    // Forward a query to the node that owns the target table
+    rpc ForwardQuery(QueryForwardRequest) returns (QueryForwardResponse);
+
+    // Scatter a query across multiple nodes (for distributed joins/aggregations)
+    rpc ScatterQuery(ScatterQueryRequest) returns (ScatterQueryResponse);
 }
 
 message Empty {}
@@ -186,4 +192,48 @@ enum NodeStatus {
     NODE_STATUS_OFFLINE = 2;
     NODE_STATUS_JOINING = 3;
     NODE_STATUS_LEAVING = 4;
+}
+
+// --- Distributed Query Routing ---
+
+// Forward a SQL query to the owner node
+message QueryForwardRequest {
+    uint64 from_node = 1;
+    string sql = 2;
+    string query_id = 3;
+    bytes session_context = 4;
+    uint64 txn_id = 5;
+}
+
+message QueryForwardResponse {
+    bool success = 1;
+    string error_message = 2;
+    repeated ColumnDefProto columns = 3;
+    bytes rows_data = 4;
+    uint64 rows_affected = 5;
+    uint64 execution_time_us = 6;
+}
+
+message ColumnDefProto {
+    string name = 1;
+    string data_type = 2;
+}
+
+// Scatter a query across multiple nodes for distributed execution
+message ScatterQueryRequest {
+    uint64 from_node = 1;
+    string sql = 2;
+    string query_id = 3;
+    bytes session_context = 4;
+    repeated string target_tables = 5;
+    bool is_partial = 6;
+}
+
+message ScatterQueryResponse {
+    bool success = 1;
+    string error_message = 2;
+    repeated ColumnDefProto columns = 3;
+    bytes rows_data = 4;
+    uint64 rows_affected = 5;
+    bytes partial_agg_state = 6;
 }

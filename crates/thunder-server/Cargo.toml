@@ -50,6 +50,8 @@ uuid.workspace = true
 chrono.workspace = true
 parking_lot.workspace = true
 lru.workspace = true
+tonic.workspace = true
+bincode.workspace = true
 
 # Disk space monitoring
 fs2.workspace = true

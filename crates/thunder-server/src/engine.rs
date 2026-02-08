@@ -43,6 +43,11 @@ use thunder_txn::{
     CommitResult, LockManager,
 };
 
+use thunder_cluster::{
+    ClusterCoordinator, DistributedCatalog, Distribution, ForwardedQueryResult,
+    QueryExecutor as ClusterQueryExecutor,
+};
+
 use crate::executor::{PhysicalExecutor, TableStorage};
 
 /// Database engine configuration
@@ -209,6 +214,10 @@ pub struct DatabaseEngine {
     read_only: AtomicBool,
     /// Query plan cache: hash of normalized SQL → cached physical plan (SELECT only)
     plan_cache: parking_lot::Mutex<lru::LruCache<u64, Arc<PhysicalPlan>>>,
+    /// Cluster coordinator (set after construction if cluster mode is enabled)
+    cluster_coordinator: parking_lot::RwLock<Option<Arc<ClusterCoordinator>>>,
+    /// Distributed table catalog (set after construction if cluster mode is enabled)
+    distributed_catalog: parking_lot::RwLock<Option<Arc<DistributedCatalog>>>,
 }
 
 /// Session state
@@ -416,6 +425,8 @@ impl DatabaseEngine {
             plan_cache: parking_lot::Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(1024).unwrap(),
             )),
+            cluster_coordinator: parking_lot::RwLock::new(None),
+            distributed_catalog: parking_lot::RwLock::new(None),
         })
     }
 
@@ -596,6 +607,155 @@ impl DatabaseEngine {
         Ok(())
     }
 
+    /// Wire the cluster coordinator and distributed catalog after construction.
+    /// Called from main.rs when cluster mode is enabled.
+    pub fn set_cluster(
+        &self,
+        coordinator: Arc<ClusterCoordinator>,
+        catalog: Arc<DistributedCatalog>,
+    ) {
+        *self.cluster_coordinator.write() = Some(coordinator);
+        *self.distributed_catalog.write() = Some(catalog);
+    }
+
+    /// Forward a query to a remote node that owns the target table.
+    async fn forward_query_to_node(&self, target_node: NodeId, sql: &str) -> Result<QueryResult> {
+        let coordinator = self.cluster_coordinator.read().clone();
+        let coordinator = coordinator.as_ref().ok_or_else(|| {
+            Error::Internal("Cluster coordinator not available".to_string())
+        })?;
+
+        let addr = coordinator.get_node_addr(target_node).ok_or_else(|| {
+            Error::Internal(format!("Address not found for node {:?}", target_node))
+        })?;
+
+        // Create gRPC channel to target node
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", addr))
+            .map_err(|e| Error::Internal(format!("Invalid endpoint: {}", e)))?
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(self.config.query_timeout);
+
+        let channel = endpoint.connect().await
+            .map_err(|e| Error::Internal(format!("Failed to connect to node {:?}: {}", target_node, e)))?;
+
+        let mut client = thunder_cluster::generated::cluster_service_client::ClusterServiceClient::new(channel);
+
+        let request = thunder_cluster::generated::QueryForwardRequest {
+            from_node: self.cluster_coordinator.read().as_ref()
+                .map(|c| c.node_id().0)
+                .unwrap_or(0),
+            sql: sql.to_string(),
+            query_id: uuid::Uuid::new_v4().to_string(),
+            session_context: Vec::new(),
+            txn_id: 0,
+        };
+
+        let response = client.forward_query(request).await
+            .map_err(|e| Error::Internal(format!("Forward query to node {:?} failed: {}", target_node, e)))?
+            .into_inner();
+
+        if !response.success {
+            return Err(Error::Internal(format!(
+                "Remote query failed on node {:?}: {}", target_node, response.error_message
+            )));
+        }
+
+        // Deserialize response into QueryResult
+        let columns: Vec<(String, DataType)> = response.columns.iter().map(|c| {
+            let dt = match c.data_type.to_uppercase().as_str() {
+                "INTEGER" | "INT" | "INT4" | "INT32" => DataType::Int32,
+                "BIGINT" | "INT8" | "INT64" => DataType::Int64,
+                "SMALLINT" | "INT2" | "INT16" => DataType::Int16,
+                "BOOLEAN" | "BOOL" => DataType::Boolean,
+                "FLOAT" | "FLOAT4" | "REAL" | "FLOAT32" => DataType::Float32,
+                "DOUBLE" | "FLOAT8" | "DOUBLE PRECISION" | "FLOAT64" => DataType::Float64,
+                "TEXT" | "VARCHAR" | "STRING" => DataType::String,
+                "DATE" => DataType::Date,
+                "TIMESTAMP" => DataType::Timestamp,
+                _ => DataType::String,
+            };
+            (c.name.clone(), dt)
+        }).collect();
+
+        let rows: Vec<Row> = if response.rows_data.is_empty() {
+            Vec::new()
+        } else {
+            bincode::deserialize(&response.rows_data)
+                .map_err(|e| Error::Internal(format!("Failed to deserialize remote rows: {}", e)))?
+        };
+
+        Ok(QueryResult {
+            query_id: uuid::Uuid::new_v4().to_string(),
+            columns,
+            rows,
+            rows_affected: if response.rows_affected > 0 { Some(response.rows_affected) } else { None },
+            execution_time: Duration::from_micros(response.execution_time_us),
+        })
+    }
+
+    /// Classify how tables referenced in a query are distributed across the cluster.
+    fn classify_distribution(&self, tables: &[String]) -> Distribution {
+        let catalog = self.distributed_catalog.read();
+        let catalog = match catalog.as_ref() {
+            Some(c) => c,
+            None => return Distribution::AllLocal,
+        };
+
+        if tables.is_empty() {
+            return Distribution::AllLocal;
+        }
+
+        let local_node = catalog.local_node();
+        let mut remote_tables = Vec::new();
+        let mut all_local = true;
+
+        for table in tables {
+            if let Some(entry) = catalog.locate_table(table) {
+                if entry.owner_node != local_node {
+                    all_local = false;
+                    remote_tables.push((table.clone(), entry.owner_node));
+                }
+            }
+            // If not in catalog, assume local (will fail with TableNotFound if not there)
+        }
+
+        if all_local {
+            return Distribution::AllLocal;
+        }
+
+        // Check if all remote tables on same node
+        let first = remote_tables[0].1;
+        if remote_tables.iter().all(|(_, n)| *n == first) && remote_tables.len() == tables.len() {
+            return Distribution::SingleRemote(first);
+        }
+
+        Distribution::MultiNode(remote_tables)
+    }
+
+    /// Extract table names referenced in a logical plan.
+    fn extract_table_names(plan: &LogicalPlan) -> Vec<String> {
+        let mut tables = Vec::new();
+        match plan {
+            LogicalPlan::Scan { table, .. } => tables.push(table.clone()),
+            LogicalPlan::Insert { table, .. } => tables.push(table.clone()),
+            LogicalPlan::Update { table, .. } => tables.push(table.clone()),
+            LogicalPlan::Delete { table, .. } => tables.push(table.clone()),
+            LogicalPlan::Join { left, right, .. } => {
+                tables.extend(Self::extract_table_names(left));
+                tables.extend(Self::extract_table_names(right));
+            }
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => {
+                tables.extend(Self::extract_table_names(input));
+            }
+            _ => {}
+        }
+        tables
+    }
+
     /// Create a new session
     pub fn create_session(&self) -> SessionState {
         let session = SessionState::new();
@@ -754,8 +914,32 @@ impl DatabaseEngine {
                 continue;
             }
 
-            // Analyze statement
-            let logical_plan = self.analyzer.analyze(stmt).await?;
+            // Analyze statement — intercept TableNotFound for distributed routing
+            let logical_plan = match self.analyzer.analyze(stmt).await {
+                Ok(plan) => plan,
+                Err(Error::Sql(SqlError::TableNotFound(ref table_name))) => {
+                    // Check distributed catalog for remote table (drop lock before await)
+                    let remote_owner = {
+                        let catalog = self.distributed_catalog.read();
+                        catalog.as_ref().and_then(|c| {
+                            c.locate_table(table_name).map(|e| e.owner_node)
+                        })
+                    };
+                    if let Some(owner_node) = remote_owner {
+                        info!(
+                            table = %table_name,
+                            owner = ?owner_node,
+                            "Forwarding query to remote node"
+                        );
+                        if auto_commit {
+                            let _ = self.txn_manager.abort(txn_id).await;
+                        }
+                        return self.forward_query_to_node(owner_node, sql).await;
+                    }
+                    return Err(Error::Sql(SqlError::TableNotFound(table_name.clone())));
+                }
+                Err(e) => return Err(e),
+            };
 
             // Handle DDL and special statements
             match &logical_plan {
@@ -788,6 +972,41 @@ impl DatabaseEngine {
                     continue;
                 }
                 _ => {}
+            }
+
+            // Check if query references tables on remote nodes
+            let has_catalog = self.distributed_catalog.read().is_some();
+            if has_catalog {
+                let tables = Self::extract_table_names(&logical_plan);
+                if !tables.is_empty() {
+                    match self.classify_distribution(&tables) {
+                        Distribution::AllLocal => { /* proceed normally */ }
+                        Distribution::SingleRemote(node) => {
+                            info!(
+                                tables = ?tables,
+                                owner = ?node,
+                                "All tables on single remote node, forwarding"
+                            );
+                            if auto_commit {
+                                let _ = self.txn_manager.abort(txn_id).await;
+                            }
+                            return self.forward_query_to_node(node, sql).await;
+                        }
+                        Distribution::MultiNode(table_nodes) => {
+                            warn!(
+                                tables = ?table_nodes,
+                                "Query spans multiple nodes — scatter-gather not yet wired to executor"
+                            );
+                            // For now, forward to the first remote node (simple heuristic).
+                            // Full scatter-gather requires deeper integration.
+                            let first_node = table_nodes[0].1;
+                            if auto_commit {
+                                let _ = self.txn_manager.abort(txn_id).await;
+                            }
+                            return self.forward_query_to_node(first_node, sql).await;
+                        }
+                    }
+                }
             }
 
             // Foreign key constraint checks for DML operations
@@ -961,6 +1180,26 @@ impl DatabaseEngine {
 
         // Invalidate plan cache on schema change
         self.plan_cache.lock().clear();
+
+        // Register in distributed catalog for cluster-wide visibility
+        if let Some(ref dist_catalog) = *self.distributed_catalog.read() {
+            let col_defs: Vec<(String, String)> = columns.iter()
+                .map(|c| (c.name.clone(), format!("{:?}", c.data_type)))
+                .collect();
+            let local_node = dist_catalog.local_node();
+            dist_catalog.register_table(name, col_defs, local_node);
+
+            // Propagate via gossip
+            if let Some(ref coordinator) = *self.cluster_coordinator.read() {
+                if let Some(gossiper) = coordinator.gossiper() {
+                    let data = dist_catalog.serialize_for_gossip();
+                    gossiper.set_app_state(
+                        thunder_cluster::AppStateKey::Schema,
+                        data,
+                    );
+                }
+            }
+        }
 
         info!("Created table '{}'", name);
         Ok(QueryResult::empty())
@@ -2399,6 +2638,47 @@ impl DatabaseEngine {
         );
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// QueryExecutor Trait Implementation (for forwarded queries from cluster)
+// ============================================================================
+
+#[async_trait::async_trait]
+impl ClusterQueryExecutor for DatabaseEngine {
+    async fn execute_forwarded_query(
+        &self,
+        sql: &str,
+        _query_id: &str,
+    ) -> Result<ForwardedQueryResult> {
+        let start = Instant::now();
+
+        // Create a temporary session for the forwarded query
+        let session = self.create_session();
+        let session_id = session.id;
+
+        let result = self.execute_sql(session_id, sql).await;
+        self.close_session(session_id);
+
+        match result {
+            Ok(qr) => {
+                let columns: Vec<(String, String)> = qr.columns.iter()
+                    .map(|(name, dt)| (name.clone(), format!("{:?}", dt)))
+                    .collect();
+
+                let rows_data = bincode::serialize(&qr.rows)
+                    .map_err(|e| Error::Internal(format!("Failed to serialize rows: {}", e)))?;
+
+                Ok(ForwardedQueryResult {
+                    columns,
+                    rows_data,
+                    rows_affected: qr.rows_affected.unwrap_or(0),
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

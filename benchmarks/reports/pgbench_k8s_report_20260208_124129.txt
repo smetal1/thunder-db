@@ -1,0 +1,1 @@
+error: error from server (NotFound): pods "thunderdb-pgbench-9pc8m" not found in namespace "thunderdb"

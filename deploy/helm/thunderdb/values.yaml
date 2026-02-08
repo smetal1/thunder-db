@@ -6,8 +6,8 @@ replicaCount: 3
 # Image configuration
 image:
   repository: saurav7055/thunderdb
-  tag: "latest"
-  pullPolicy: Always
+  tag: "0.6.0"
+  pullPolicy: IfNotPresent
 
 # Image pull secrets (if using private registry)
 imagePullSecrets: []
@@ -26,7 +26,10 @@ serviceAccount:
 podAnnotations: {}
 
 # Pod security context
-podSecurityContext: {}
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+  runAsGroup: 1000
 
 # Container security context
 securityContext: {}
@@ -44,8 +47,8 @@ service:
 # Resource requests and limits
 resources:
   requests:
-    cpu: 500m
-    memory: 2Gi
+    cpu: 1
+    memory: 1Gi
   limits:
     cpu: 4
     memory: 8Gi

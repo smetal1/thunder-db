@@ -1043,6 +1043,8 @@ pub struct ClusterServer {
     gossip_sender: Option<mpsc::Sender<(SocketAddr, crate::gossip::GossipMessage)>>,
     /// Transport reference for conversions
     transport: Arc<ClusterTransport>,
+    /// Engine reference for executing forwarded queries
+    engine: Option<Arc<dyn crate::catalog_sync::QueryExecutor>>,
 }
 
 impl ClusterServer {
@@ -1059,6 +1061,221 @@ impl ClusterServer {
             raft_sender,
             gossip_sender,
             transport,
+            engine: None,
+        }
+    }
+
+    /// Set the query executor (engine) for handling forwarded queries.
+    pub fn set_engine(&mut self, engine: Arc<dyn crate::catalog_sync::QueryExecutor>) {
+        self.engine = Some(engine);
+    }
+}
+
+#[tonic::async_trait]
+impl crate::generated::cluster_service_server::ClusterService for ClusterServer {
+    async fn send_message(
+        &self,
+        request: tonic::Request<crate::generated::ClusterMessage>,
+    ) -> std::result::Result<tonic::Response<crate::generated::Empty>, tonic::Status> {
+        let msg = request.into_inner();
+
+        // Inject Raft message into transport's receiver
+        if let Some(crate::generated::cluster_message::Payload::Raft(raft)) = msg.payload {
+            let raft_msg = RaftMessage {
+                region_id: RegionId(raft.region_id),
+                from: NodeId(msg.from_node),
+                to: NodeId(msg.to_node),
+                msg_type: match raft.msg_type {
+                    x if x == crate::generated::RaftMessageType::RaftRequestVote as i32 => RaftMessageType::RequestVote,
+                    x if x == crate::generated::RaftMessageType::RaftRequestVoteResponse as i32 => RaftMessageType::RequestVoteResponse,
+                    x if x == crate::generated::RaftMessageType::RaftAppendEntries as i32 => RaftMessageType::AppendEntries,
+                    x if x == crate::generated::RaftMessageType::RaftAppendEntriesResponse as i32 => RaftMessageType::AppendEntriesResponse,
+                    x if x == crate::generated::RaftMessageType::RaftHeartbeat as i32 => RaftMessageType::Heartbeat,
+                    x if x == crate::generated::RaftMessageType::RaftHeartbeatResponse as i32 => RaftMessageType::HeartbeatResponse,
+                    _ => RaftMessageType::Snapshot,
+                },
+                term: raft.term,
+                payload: raft.payload,
+            };
+
+            let _ = self.raft_sender.send(raft_msg).await;
+        }
+
+        Ok(tonic::Response::new(crate::generated::Empty {}))
+    }
+
+    async fn send_request(
+        &self,
+        request: tonic::Request<crate::generated::ClusterMessage>,
+    ) -> std::result::Result<tonic::Response<crate::generated::ClusterMessage>, tonic::Status> {
+        let msg = request.into_inner();
+
+        // Echo back a response for now
+        let response = crate::generated::ClusterMessage {
+            from_node: self.node_id.0,
+            to_node: msg.from_node,
+            cluster_name: self.cluster_name.clone(),
+            payload: None,
+        };
+
+        Ok(tonic::Response::new(response))
+    }
+
+    async fn gossip(
+        &self,
+        request: tonic::Request<crate::generated::GossipRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::GossipResponse>, tonic::Status> {
+        let _req = request.into_inner();
+
+        // Return an empty gossip response as a stub
+        Ok(tonic::Response::new(crate::generated::GossipResponse {
+            message: None,
+        }))
+    }
+
+    async fn join_cluster(
+        &self,
+        request: tonic::Request<crate::generated::JoinRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::JoinResponse>, tonic::Status> {
+        let req = request.into_inner();
+        tracing::info!("Node {} requesting to join cluster", req.node_id);
+
+        Ok(tonic::Response::new(crate::generated::JoinResponse {
+            success: true,
+            error_message: String::new(),
+            leader_id: self.node_id.0,
+            leader_addr: String::new(),
+            nodes: Vec::new(),
+        }))
+    }
+
+    async fn leave_cluster(
+        &self,
+        request: tonic::Request<crate::generated::LeaveRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::LeaveResponse>, tonic::Status> {
+        let req = request.into_inner();
+        tracing::info!("Node {} leaving cluster", req.node_id);
+
+        Ok(tonic::Response::new(crate::generated::LeaveResponse {
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn health_check(
+        &self,
+        _request: tonic::Request<crate::generated::HealthRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::HealthResponse>, tonic::Status> {
+        Ok(tonic::Response::new(crate::generated::HealthResponse {
+            healthy: true,
+            status: crate::generated::NodeStatus::Online as i32,
+            region_count: 0,
+            storage_used: 0,
+            storage_capacity: 0,
+            cpu_utilization: 0.0,
+            memory_utilization: 0.0,
+        }))
+    }
+
+    async fn forward_query(
+        &self,
+        request: tonic::Request<crate::generated::QueryForwardRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::QueryForwardResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        let engine = match &self.engine {
+            Some(e) => e.clone(),
+            None => {
+                return Ok(tonic::Response::new(crate::generated::QueryForwardResponse {
+                    success: false,
+                    error_message: "Query executor not available on this node".to_string(),
+                    columns: Vec::new(),
+                    rows_data: Vec::new(),
+                    rows_affected: 0,
+                    execution_time_us: 0,
+                }));
+            }
+        };
+
+        match engine.execute_forwarded_query(&req.sql, &req.query_id).await {
+            Ok(result) => {
+                let columns = result.columns.iter().map(|(name, dtype)| {
+                    crate::generated::ColumnDefProto {
+                        name: name.clone(),
+                        data_type: dtype.clone(),
+                    }
+                }).collect();
+
+                Ok(tonic::Response::new(crate::generated::QueryForwardResponse {
+                    success: true,
+                    error_message: String::new(),
+                    columns,
+                    rows_data: result.rows_data,
+                    rows_affected: result.rows_affected,
+                    execution_time_us: result.execution_time_us,
+                }))
+            }
+            Err(e) => {
+                Ok(tonic::Response::new(crate::generated::QueryForwardResponse {
+                    success: false,
+                    error_message: e.to_string(),
+                    columns: Vec::new(),
+                    rows_data: Vec::new(),
+                    rows_affected: 0,
+                    execution_time_us: 0,
+                }))
+            }
+        }
+    }
+
+    async fn scatter_query(
+        &self,
+        request: tonic::Request<crate::generated::ScatterQueryRequest>,
+    ) -> std::result::Result<tonic::Response<crate::generated::ScatterQueryResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        let engine = match &self.engine {
+            Some(e) => e.clone(),
+            None => {
+                return Ok(tonic::Response::new(crate::generated::ScatterQueryResponse {
+                    success: false,
+                    error_message: "Query executor not available on this node".to_string(),
+                    columns: Vec::new(),
+                    rows_data: Vec::new(),
+                    rows_affected: 0,
+                    partial_agg_state: Vec::new(),
+                }));
+            }
+        };
+
+        match engine.execute_forwarded_query(&req.sql, &req.query_id).await {
+            Ok(result) => {
+                let columns = result.columns.iter().map(|(name, dtype)| {
+                    crate::generated::ColumnDefProto {
+                        name: name.clone(),
+                        data_type: dtype.clone(),
+                    }
+                }).collect();
+
+                Ok(tonic::Response::new(crate::generated::ScatterQueryResponse {
+                    success: true,
+                    error_message: String::new(),
+                    columns,
+                    rows_data: result.rows_data,
+                    rows_affected: result.rows_affected,
+                    partial_agg_state: Vec::new(),
+                }))
+            }
+            Err(e) => {
+                Ok(tonic::Response::new(crate::generated::ScatterQueryResponse {
+                    success: false,
+                    error_message: e.to_string(),
+                    columns: Vec::new(),
+                    rows_data: Vec::new(),
+                    rows_affected: 0,
+                    partial_agg_state: Vec::new(),
+                }))
+            }
         }
     }
 }

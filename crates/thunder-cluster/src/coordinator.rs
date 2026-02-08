@@ -133,6 +133,10 @@ pub struct ClusterCoordinator {
     shutdown: AtomicBool,
     /// Background task handles
     task_handles: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Distributed table catalog
+    distributed_catalog: Option<Arc<crate::catalog_sync::DistributedCatalog>>,
+    /// Distributed deadlock detector
+    deadlock_detector: Option<Arc<crate::deadlock::DistributedDeadlockDetector>>,
 }
 
 impl ClusterCoordinator {
@@ -166,6 +170,16 @@ impl ClusterCoordinator {
             None
         };
 
+        let distributed_catalog = Some(Arc::new(crate::catalog_sync::DistributedCatalog::new(
+            config.node_id,
+            config.max_regions_per_node.min(16), // shard_count
+            config.target_replicas,
+        )));
+
+        let deadlock_detector = Some(Arc::new(
+            crate::deadlock::DistributedDeadlockDetector::new(config.node_id),
+        ));
+
         Self {
             config,
             state: RwLock::new(ClusterState::Initializing),
@@ -177,12 +191,34 @@ impl ClusterCoordinator {
             next_op_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
             task_handles: AsyncMutex::new(Vec::new()),
+            distributed_catalog,
+            deadlock_detector,
         }
+    }
+
+    /// Get the distributed catalog
+    pub fn distributed_catalog(&self) -> Option<&Arc<crate::catalog_sync::DistributedCatalog>> {
+        self.distributed_catalog.as_ref()
+    }
+
+    /// Get the deadlock detector
+    pub fn deadlock_detector(&self) -> Option<&Arc<crate::deadlock::DistributedDeadlockDetector>> {
+        self.deadlock_detector.as_ref()
     }
 
     /// Get the gossiper
     pub fn gossiper(&self) -> Option<&Arc<Gossiper>> {
         self.gossiper.as_ref()
+    }
+
+    /// Get the address of a remote node (from transport registry).
+    pub fn get_node_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
+        self.transport.get_addr(node_id)
+    }
+
+    /// Get the membership manager.
+    pub fn membership(&self) -> &Arc<Membership> {
+        &self.membership
     }
 
     /// Get the node ID
@@ -493,6 +529,8 @@ impl ClusterCoordinator {
             next_op_id: AtomicU64::new(self.next_op_id.load(Ordering::SeqCst)),
             shutdown: AtomicBool::new(self.shutdown.load(Ordering::SeqCst)),
             task_handles: AsyncMutex::new(Vec::new()),
+            distributed_catalog: self.distributed_catalog.clone(),
+            deadlock_detector: self.deadlock_detector.clone(),
         })
     }
 
@@ -922,11 +960,6 @@ impl ClusterCoordinator {
                 tracing::info!("Cluster leader changed: {:?} -> {:?}", old, new);
             }
         }
-    }
-
-    /// Get membership manager
-    pub fn membership(&self) -> &Arc<Membership> {
-        &self.membership
     }
 
     /// Get region manager

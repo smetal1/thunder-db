@@ -242,6 +242,78 @@ pub struct NodeInfoProto {
     #[prost(uint64, tag = "4")]
     pub region_count: u64,
 }
+/// Forward a SQL query to the owner node
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryForwardRequest {
+    #[prost(uint64, tag = "1")]
+    pub from_node: u64,
+    #[prost(string, tag = "2")]
+    pub sql: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub query_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "4")]
+    pub session_context: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "5")]
+    pub txn_id: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryForwardResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(string, tag = "2")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub columns: ::prost::alloc::vec::Vec<ColumnDefProto>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub rows_data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "5")]
+    pub rows_affected: u64,
+    #[prost(uint64, tag = "6")]
+    pub execution_time_us: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ColumnDefProto {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub data_type: ::prost::alloc::string::String,
+}
+/// Scatter a query across multiple nodes for distributed execution
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScatterQueryRequest {
+    #[prost(uint64, tag = "1")]
+    pub from_node: u64,
+    #[prost(string, tag = "2")]
+    pub sql: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub query_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "4")]
+    pub session_context: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, repeated, tag = "5")]
+    pub target_tables: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "6")]
+    pub is_partial: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScatterQueryResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(string, tag = "2")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub columns: ::prost::alloc::vec::Vec<ColumnDefProto>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub rows_data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "5")]
+    pub rows_affected: u64,
+    #[prost(bytes = "vec", tag = "6")]
+    pub partial_agg_state: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RaftMessageType {
@@ -587,6 +659,62 @@ pub mod cluster_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Forward a query to the node that owns the target table
+        pub async fn forward_query(
+            &mut self,
+            request: impl tonic::IntoRequest<super::QueryForwardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::QueryForwardResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/thunderdb.cluster.ClusterService/ForwardQuery",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("thunderdb.cluster.ClusterService", "ForwardQuery"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Scatter a query across multiple nodes (for distributed joins/aggregations)
+        pub async fn scatter_query(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ScatterQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ScatterQueryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/thunderdb.cluster.ClusterService/ScatterQuery",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("thunderdb.cluster.ClusterService", "ScatterQuery"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -626,6 +754,22 @@ pub mod cluster_service_server {
             &self,
             request: tonic::Request<super::HealthRequest>,
         ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status>;
+        /// Forward a query to the node that owns the target table
+        async fn forward_query(
+            &self,
+            request: tonic::Request<super::QueryForwardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::QueryForwardResponse>,
+            tonic::Status,
+        >;
+        /// Scatter a query across multiple nodes (for distributed joins/aggregations)
+        async fn scatter_query(
+            &self,
+            request: tonic::Request<super::ScatterQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ScatterQueryResponse>,
+            tonic::Status,
+        >;
     }
     /// ClusterService handles all inter-node communication for clustering
     #[derive(Debug)]
@@ -968,6 +1112,98 @@ pub mod cluster_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = HealthCheckSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/thunderdb.cluster.ClusterService/ForwardQuery" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForwardQuerySvc<T: ClusterService>(pub Arc<T>);
+                    impl<
+                        T: ClusterService,
+                    > tonic::server::UnaryService<super::QueryForwardRequest>
+                    for ForwardQuerySvc<T> {
+                        type Response = super::QueryForwardResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::QueryForwardRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ClusterService>::forward_query(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = ForwardQuerySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/thunderdb.cluster.ClusterService/ScatterQuery" => {
+                    #[allow(non_camel_case_types)]
+                    struct ScatterQuerySvc<T: ClusterService>(pub Arc<T>);
+                    impl<
+                        T: ClusterService,
+                    > tonic::server::UnaryService<super::ScatterQueryRequest>
+                    for ScatterQuerySvc<T> {
+                        type Response = super::ScatterQueryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ScatterQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ClusterService>::scatter_query(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = ScatterQuerySvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
