@@ -112,7 +112,7 @@ pub trait QueryExecutor: Send + Sync {
 }
 
 /// Query result from the executor
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Vec<Option<String>>>,
