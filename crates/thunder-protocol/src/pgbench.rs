@@ -7,9 +7,6 @@
 //! - COPY command for bulk data loading
 //! - Batch INSERT optimization
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use thunder_common::prelude::*;
 
 /// System catalog response for pgbench compatibility
@@ -560,7 +557,7 @@ impl CopyCommand {
                 .collect();
             // Find next part after closing paren
             let remaining = &full[paren_end + 1..];
-            let next_parts: Vec<&str> = remaining.split_whitespace().collect();
+            let _next_parts: Vec<&str> = remaining.split_whitespace().collect();
             idx = parts.len(); // We've consumed all parts in this case
             (table, Some(cols))
         } else {

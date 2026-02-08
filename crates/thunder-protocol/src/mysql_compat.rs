@@ -40,6 +40,7 @@ impl MySqlQueryResult {
 /// MySQL compatibility handler
 pub struct MySqlCompat {
     /// Server version to report
+    #[allow(dead_code)]
     server_version: String,
     /// Session variables
     variables: parking_lot::RwLock<HashMap<String, String>>,

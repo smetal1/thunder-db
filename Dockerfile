@@ -21,7 +21,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Build release binaries
-RUN cargo build --release
+# Override codegen-units for Docker builds to avoid OOM during cross-compilation.
+# The workspace Cargo.toml sets codegen-units=1 for max optimization, but that
+# requires too much memory when cross-compiling large crates like datafusion.
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
+RUN cargo build --release --jobs 2
 
 # Stage 2: Runtime
 FROM ubuntu:22.04

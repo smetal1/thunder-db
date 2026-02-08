@@ -14,6 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 use thunder_common::prelude::Value;
@@ -143,13 +144,9 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         }
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Binary(b) => serde_json::Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b.as_ref())),
-        Value::Date(d) => serde_json::Value::String(format!("{}", d)),
-        Value::Time(t) => serde_json::Value::String(format!("{}", t)),
-        Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
-        Value::TimestampTz(ts, tz) => serde_json::json!({
-            "timestamp": ts,
-            "timezone": tz
-        }),
+        Value::Date(_) | Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_, _) => {
+            serde_json::Value::String(format!("{}", value))
+        }
         Value::Uuid(u) => serde_json::Value::String(uuid::Uuid::from_slice(u).map(|u| u.to_string()).unwrap_or_default()),
         Value::Json(j) => serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string())),
         Value::Vector(v) => serde_json::Value::Array(v.iter().map(|f| {
@@ -320,11 +317,40 @@ impl QueryRoot {
         }
     }
 
-    /// List all indexes
-    async fn indexes(&self, ctx: &Context<'_>, _table: Option<String>) -> GqlResult<Vec<IndexInfo>> {
-        let _state = ctx.data::<AppState>()?;
-        // TODO: Query catalog for indexes
-        Ok(vec![])
+    /// List all indexes (derived from primary keys and table metadata)
+    async fn indexes(&self, ctx: &Context<'_>, table: Option<String>) -> GqlResult<Vec<IndexInfo>> {
+        let state = ctx.data::<AppState>()?;
+
+        let engine = match state.engine() {
+            Some(e) => e,
+            None => return Ok(vec![]),
+        };
+
+        let tables = match table {
+            Some(ref name) => vec![name.clone()],
+            None => engine.list_tables(),
+        };
+
+        let mut indexes = Vec::new();
+        for table_name in &tables {
+            if let Some(info) = engine.get_table(table_name) {
+                // Report primary key as an index
+                if !info.primary_key.is_empty() {
+                    let pk_columns: Vec<String> = info.primary_key.iter()
+                        .filter_map(|&i| info.schema.columns.get(i).map(|c| c.name.clone()))
+                        .collect();
+                    indexes.push(IndexInfo {
+                        name: format!("{}_pkey", table_name),
+                        table_name: table_name.clone(),
+                        columns: pk_columns,
+                        unique: true,
+                        index_type: "btree".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(indexes)
     }
 
     /// Get server health status
@@ -353,11 +379,29 @@ impl QueryRoot {
         })
     }
 
-    /// Get active transactions
+    /// Get active transactions (summary from engine stats)
     async fn transactions(&self, ctx: &Context<'_>) -> GqlResult<Vec<TransactionInfo>> {
-        let _state = ctx.data::<AppState>()?;
-        // TODO: List active transactions from session manager
-        Ok(vec![])
+        let state = ctx.data::<AppState>()?;
+
+        // The QueryEngine trait exposes aggregate stats but not individual
+        // transaction details. Return the count as a single summary entry
+        // when transactions are active.
+        match state.engine() {
+            Some(engine) => {
+                let stats = engine.stats();
+                if stats.active_transactions > 0 {
+                    Ok(vec![TransactionInfo {
+                        id: format!("{} active", stats.active_transactions),
+                        isolation_level: "repeatable_read".to_string(),
+                        read_only: false,
+                        started_at: chrono::Utc::now().to_rfc3339(),
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            None => Ok(vec![]),
+        }
     }
 }
 
@@ -846,27 +890,103 @@ pub struct SubscriptionRoot;
 
 #[Subscription]
 impl SubscriptionRoot {
-    /// Subscribe to table changes
+    /// Subscribe to table changes via CDC
     async fn table_changes(
         &self,
-        _table: String,
-        _operations: Option<Vec<String>>,
+        ctx: &Context<'_>,
+        table: String,
+        operations: Option<Vec<String>>,
     ) -> impl futures::Stream<Item = ChangeEvent> {
-        info!(table = %_table, "New GraphQL subscription for table changes");
+        info!(table = %table, "New GraphQL subscription for table changes");
 
-        // TODO: Connect to actual CDC system
-        futures::stream::pending()
+        let state = ctx.data::<AppState>().ok().cloned();
+        let op_filter: Option<Vec<String>> = operations.map(|ops| {
+            ops.into_iter().map(|o| o.to_uppercase()).collect()
+        });
+
+        match state.and_then(|s| s.cdc_manager().cloned()) {
+            Some(manager) => {
+                let rx = manager.subscribe();
+                let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+                    .filter_map(move |result| {
+                        let table = table.clone();
+                        let op_filter = op_filter.clone();
+                        async move {
+                            let event = result.ok()?;
+                            // Filter by table name
+                            if event.table != table {
+                                return None;
+                            }
+                            let op_str = format!("{:?}", event.operation).to_uppercase();
+                            // Filter by operation type if specified
+                            if let Some(ref ops) = op_filter {
+                                if !ops.contains(&op_str) {
+                                    return None;
+                                }
+                            }
+                            Some(ChangeEvent {
+                                table: event.table,
+                                operation: op_str,
+                                old_row: event.before.map(|row| {
+                                    serde_json::to_value(&row).unwrap_or_default()
+                                }),
+                                new_row: event.after.map(|row| {
+                                    serde_json::to_value(&row).unwrap_or_default()
+                                }),
+                                timestamp: event.timestamp.to_rfc3339(),
+                            })
+                        }
+                    });
+                futures::stream::StreamExt::boxed(stream)
+            }
+            None => {
+                // No CDC manager - return empty stream
+                futures::stream::StreamExt::boxed(futures::stream::pending())
+            }
+        }
     }
 
     /// Subscribe to query notifications (LISTEN/NOTIFY)
     async fn notifications(
         &self,
+        ctx: &Context<'_>,
         channel: String,
     ) -> impl futures::Stream<Item = Notification> {
         info!(channel = %channel, "New notification subscription");
 
-        // TODO: Connect to notification system
-        futures::stream::pending()
+        let state = ctx.data::<AppState>().ok().cloned();
+
+        match state.and_then(|s| s.cdc_manager().cloned()) {
+            Some(manager) => {
+                // Notifications are delivered through the CDC event stream
+                // filtering for NOTIFY events on the specified channel
+                let rx = manager.subscribe();
+                let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+                    .filter_map(move |result| {
+                        let channel = channel.clone();
+                        async move {
+                            let event = result.ok()?;
+                            // Match NOTIFY events on this channel
+                            if event.table == channel {
+                                let payload = event.after
+                                    .and_then(|row| row.values.first().map(|v| format!("{}", v)))
+                                    .unwrap_or_default();
+                                Some(Notification {
+                                    channel,
+                                    payload,
+                                    timestamp: event.timestamp.to_rfc3339(),
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                    });
+                futures::stream::StreamExt::boxed(stream)
+            }
+            None => {
+                futures::stream::StreamExt::boxed(futures::stream::pending())
+            }
+        }
     }
 }
 

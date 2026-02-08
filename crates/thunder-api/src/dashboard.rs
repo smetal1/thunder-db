@@ -274,10 +274,9 @@ fn value_to_json(value: &thunder_common::types::Value) -> serde_json::Value {
             use base64::Engine;
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(b.as_ref()))
         }
-        Value::Date(d) => serde_json::json!(d),
-        Value::Time(t) => serde_json::json!(t),
-        Value::Timestamp(ts) => serde_json::json!(ts),
-        Value::TimestampTz(ts, offset) => serde_json::json!(format!("{}+{}", ts, offset)),
+        Value::Date(_) | Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_, _) => {
+            serde_json::Value::String(format!("{}", value))
+        }
         Value::Uuid(u) => {
             // Format UUID bytes as standard UUID string
             let hex = hex::encode(u);

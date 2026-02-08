@@ -612,11 +612,8 @@ fn value_to_json(value: &thunder_common::types::Value) -> serde_json::Value {
             }
             serde_json::Value::String(encoded)
         }
-        Value::Date(d) => serde_json::Value::Number((*d).into()),
-        Value::Time(t) => serde_json::Value::Number((*t).into()),
-        Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
-        Value::TimestampTz(ts, offset) => {
-            serde_json::json!({"timestamp": ts, "offset": offset})
+        Value::Date(_) | Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_, _) => {
+            serde_json::Value::String(format!("{}", value))
         }
         Value::Uuid(u) => {
             let mut hex = String::with_capacity(36);

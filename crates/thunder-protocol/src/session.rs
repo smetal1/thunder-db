@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use thunder_common::prelude::*;

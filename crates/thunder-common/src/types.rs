@@ -1,5 +1,6 @@
 //! Core types for ThunderDB
 
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -287,7 +288,13 @@ impl Value {
             Value::Uuid(_) => DataType::Uuid,
             Value::Json(_) => DataType::Json,
             Value::Vector(v) => DataType::Vector(v.len() as u32),
-            Value::Array(_) => DataType::Array(Box::new(DataType::Null)), // TODO: infer inner type
+            Value::Array(arr) => {
+                let inner = arr.iter()
+                    .find(|v| !v.is_null())
+                    .map(|v| v.data_type())
+                    .unwrap_or(DataType::Null);
+                DataType::Array(Box::new(inner))
+            }
         }
     }
 
@@ -355,10 +362,59 @@ impl fmt::Display for Value {
             }
             Value::String(v) => write!(f, "'{}'", v),
             Value::Binary(v) => write!(f, "\\x{}", hex::encode(v.as_ref())),
-            Value::Date(v) => write!(f, "{}", v), // TODO: format as date
-            Value::Time(v) => write!(f, "{}", v), // TODO: format as time
-            Value::Timestamp(v) => write!(f, "{}", v), // TODO: format as timestamp
-            Value::TimestampTz(v, tz) => write!(f, "{}+{}", v, tz),
+            Value::Date(v) => {
+                // Days since Unix epoch (1970-01-01)
+                match NaiveDate::from_num_days_from_ce_opt(719_163 + *v) {
+                    Some(d) => write!(f, "{}", d.format("%Y-%m-%d")),
+                    None => write!(f, "{}", v),
+                }
+            }
+            Value::Time(v) => {
+                // Microseconds since midnight
+                let total_secs = *v / 1_000_000;
+                let micros = (*v % 1_000_000) as u32;
+                match NaiveTime::from_num_seconds_from_midnight_opt(total_secs as u32, micros * 1000) {
+                    Some(t) => {
+                        if micros == 0 {
+                            write!(f, "{}", t.format("%H:%M:%S"))
+                        } else {
+                            write!(f, "{}", t.format("%H:%M:%S%.6f"))
+                        }
+                    }
+                    None => write!(f, "{}", v),
+                }
+            }
+            Value::Timestamp(v) => {
+                // Microseconds since Unix epoch
+                let secs = *v / 1_000_000;
+                let micros = (*v % 1_000_000).unsigned_abs() as u32;
+                match Utc.timestamp_opt(secs, micros * 1000) {
+                    chrono::LocalResult::Single(dt) => {
+                        if micros == 0 {
+                            write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S"))
+                        } else {
+                            write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
+                        }
+                    }
+                    _ => write!(f, "{}", v),
+                }
+            }
+            Value::TimestampTz(v, tz) => {
+                let secs = *v / 1_000_000;
+                let micros = (*v % 1_000_000).unsigned_abs() as u32;
+                let tz_hours = *tz / 3600;
+                let tz_mins = ((*tz % 3600) / 60).abs();
+                match Utc.timestamp_opt(secs, micros * 1000) {
+                    chrono::LocalResult::Single(dt) => {
+                        if micros == 0 {
+                            write!(f, "{}{:+03}:{:02}", dt.format("%Y-%m-%d %H:%M:%S"), tz_hours, tz_mins)
+                        } else {
+                            write!(f, "{}{:+03}:{:02}", dt.format("%Y-%m-%d %H:%M:%S%.6f"), tz_hours, tz_mins)
+                        }
+                    }
+                    _ => write!(f, "{}+{}", v, tz),
+                }
+            }
             Value::Uuid(v) => write!(f, "{}", uuid::Uuid::from_bytes(*v)),
             Value::Json(v) => write!(f, "{}", v),
             Value::Vector(v) => write!(f, "[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")),

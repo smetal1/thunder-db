@@ -219,11 +219,8 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         }
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Binary(b) => serde_json::Value::String(base64::encode(b)),
-        Value::Date(d) => serde_json::Value::Number((*d).into()),
-        Value::Time(t) => serde_json::Value::Number((*t).into()),
-        Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
-        Value::TimestampTz(ts, offset) => {
-            serde_json::json!({"timestamp": ts, "offset": offset})
+        Value::Date(_) | Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_, _) => {
+            serde_json::Value::String(format!("{}", value))
         }
         Value::Uuid(u) => serde_json::Value::String(hex::encode(u)),
         Value::Json(j) => {

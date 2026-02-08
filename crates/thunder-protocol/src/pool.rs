@@ -16,6 +16,8 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+// Session imports not currently used but kept for future session management
+#[allow(unused_imports)]
 use crate::session::{SessionContext, SessionManager, SessionConfig};
 
 /// Server-side connection pool configuration
@@ -164,6 +166,7 @@ struct ServerConnectionPoolInner {
     config: PoolConfig,
     available: Mutex<VecDeque<PooledSession>>,
     semaphore: Semaphore,
+    #[allow(dead_code)]
     stats: RwLock<PoolStats>,
     active_count: AtomicUsize,
     total_created: AtomicU64,

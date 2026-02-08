@@ -8,16 +8,16 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use thunder_common::prelude::*;
 
-use crate::{AuthMethod, AuthResult, ConnectionLimiter, MaybeTlsStream, PreparedStatement, ProtocolConfig, ProtocolHandler, ReloadableTlsAcceptor, Session, TlsConfig, TlsError};
+use crate::{AuthMethod, ConnectionLimiter, MaybeTlsStream, ProtocolConfig, ProtocolHandler, ReloadableTlsAcceptor, Session, TlsConfig, TlsError};
 use crate::auth::{compute_md5_hash, verify_password};
 use crate::pgbench::{PgbenchCompat, CatalogQueryResult, CopyCommand, CopySource, CopyFormat, BatchInsertBuilder};
 
@@ -47,10 +47,12 @@ const MSG_DATA_ROW: u8 = b'D';
 const MSG_EMPTY_QUERY_RESPONSE: u8 = b'I';
 const MSG_ERROR_RESPONSE: u8 = b'E';
 const MSG_NO_DATA: u8 = b'n';
+#[allow(dead_code)]
 const MSG_NOTICE_RESPONSE: u8 = b'N';
 const MSG_PARAMETER_DESCRIPTION: u8 = b't';
 const MSG_PARAMETER_STATUS: u8 = b'S';
 const MSG_PARSE_COMPLETE: u8 = b'1';
+#[allow(dead_code)]
 const MSG_PORTAL_SUSPENDED: u8 = b's';
 const MSG_READY_FOR_QUERY: u8 = b'Z';
 const MSG_ROW_DESCRIPTION: u8 = b'T';
@@ -71,8 +73,11 @@ const MSG_TERMINATE: u8 = b'X';
 const AUTH_OK: i32 = 0;
 const AUTH_CLEARTEXT_PASSWORD: i32 = 3;
 const AUTH_MD5_PASSWORD: i32 = 5;
+#[allow(dead_code)]
 const AUTH_SASL: i32 = 10;
+#[allow(dead_code)]
 const AUTH_SASL_CONTINUE: i32 = 11;
+#[allow(dead_code)]
 const AUTH_SASL_FINAL: i32 = 12;
 
 // Transaction states
@@ -354,6 +359,7 @@ struct PostgresConnection<E: QueryExecutor> {
     config: ProtocolConfig,
     session: Session,
     session_id: Option<uuid::Uuid>,
+    #[allow(dead_code)]
     read_buf: BytesMut,
     write_buf: BytesMut,
     backend_key: (i32, i32), // (process_id, secret_key)
@@ -1037,10 +1043,11 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             if len == -1 {
                 params.push(None);
             } else if (len as usize) > MAX_PARAMETER_SIZE {
-                return Err(Error::Internal(format!(
+                self.send_error("54000", &format!(
                     "Parameter value size {} exceeds maximum of {} bytes",
                     len, MAX_PARAMETER_SIZE
-                )));
+                )).await?;
+                return Ok(());
             } else {
                 let mut value = vec![0u8; len as usize];
                 self.stream.read_exact(&mut value).await
@@ -1119,17 +1126,30 @@ impl<E: QueryExecutor> PostgresConnection<E> {
 
         debug!("Execute: portal='{}', max_rows={}", portal_name, max_rows);
 
-        let session_id = self.session_id.ok_or_else(||
-            Error::Internal("No session".into()))?;
+        let session_id = match self.session_id {
+            Some(id) => id,
+            None => {
+                self.send_error("08003", "No active session").await?;
+                return Ok(());
+            }
+        };
 
         // Get portal and statement
-        let portal = self.portals.get(&portal_name)
-            .ok_or_else(|| Error::Internal(format!("Portal '{}' not found", portal_name)))?
-            .clone();
+        let portal = match self.portals.get(&portal_name) {
+            Some(p) => p.clone(),
+            None => {
+                self.send_error("34000", &format!("Portal '{}' does not exist", portal_name)).await?;
+                return Ok(());
+            }
+        };
 
-        let stmt = self.prepared_statements.get(&portal.statement_name)
-            .ok_or_else(|| Error::Internal(format!("Statement '{}' not found", portal.statement_name)))?
-            .clone();
+        let stmt = match self.prepared_statements.get(&portal.statement_name) {
+            Some(s) => s.clone(),
+            None => {
+                self.send_error("26000", &format!("Prepared statement '{}' does not exist", portal.statement_name)).await?;
+                return Ok(());
+            }
+        };
 
         // Substitute parameters in query
         let query = self.substitute_params(&stmt.query, &portal.params)?;

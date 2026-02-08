@@ -342,7 +342,7 @@ impl ExprEvaluator {
             Value::Boolean(b) => b.to_string(),
             Value::Null => "NULL".to_string(),
             Value::Binary(b) => format!("{:?}", b),
-            Value::Timestamp(t) => t.to_string(),
+            v @ Value::Timestamp(_) => format!("{}", v),
             Value::Json(j) => j.to_string(),
             Value::Array(a) => format!("{:?}", a),
             _ => format!("{:?}", val),

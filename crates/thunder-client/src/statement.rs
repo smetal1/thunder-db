@@ -227,10 +227,10 @@ fn encode_param(value: &Value) -> String {
         }
         Value::String(s) => format!("'{}'", escape_string(s)),
         Value::Binary(b) => format!("'\\x{}'", hex::encode(b.as_ref())),
-        Value::Date(d) => format!("'{}'::date", d),
-        Value::Time(t) => format!("'{}'::time", t),
-        Value::Timestamp(ts) => format!("'{}'::timestamp", ts),
-        Value::TimestampTz(ts, _tz) => format!("'{}'::timestamptz", ts),
+        v @ Value::Date(_) => format!("'{}'::date", v),
+        v @ Value::Time(_) => format!("'{}'::time", v),
+        v @ Value::Timestamp(_) => format!("'{}'::timestamp", v),
+        v @ Value::TimestampTz(_, _) => format!("'{}'::timestamptz", v),
         Value::Uuid(u) => format!("'{}'::uuid", uuid::Uuid::from_bytes(*u)),
         Value::Json(j) => format!("'{}'::jsonb", escape_string(j)),
         Value::Vector(v) => {

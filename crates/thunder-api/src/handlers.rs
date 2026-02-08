@@ -11,8 +11,9 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use thunder_common::prelude::Value;
+use thunder_cdc::{CdcConfig, ConnectorType, CdcPosition};
 
 use crate::{
     ApiError, AppState, ColumnInfo, EngineStats, HealthResponse, MetricsResponse, QueryRequest,
@@ -195,13 +196,9 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         }
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Binary(b) => serde_json::Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b.as_ref())),
-        Value::Date(d) => serde_json::Value::String(format!("{}", d)),
-        Value::Time(t) => serde_json::Value::String(format!("{}", t)),
-        Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
-        Value::TimestampTz(ts, tz) => serde_json::json!({
-            "timestamp": ts,
-            "timezone": tz
-        }),
+        Value::Date(_) | Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_, _) => {
+            serde_json::Value::String(format!("{}", value))
+        }
         Value::Uuid(u) => serde_json::Value::String(uuid::Uuid::from_slice(u).map(|u| u.to_string()).unwrap_or_default()),
         Value::Json(j) => serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string())),
         Value::Vector(v) => serde_json::Value::Array(v.iter().map(|f| {
@@ -429,25 +426,31 @@ pub async fn get_table(
     // Get table from catalog
     match engine.get_table(&name) {
         Some(table_info) => {
+            let pk_indices = &table_info.primary_key;
             let columns: Vec<ColumnSchema> = table_info.schema.columns
                 .iter()
-                .map(|c| ColumnSchema {
+                .enumerate()
+                .map(|(i, c)| ColumnSchema {
                     name: c.name.clone(),
                     data_type: format!("{:?}", c.data_type),
                     nullable: c.nullable,
                     default_value: c.default.as_ref().map(|v| format!("{}", v)),
-                    is_primary_key: false, // TODO: Track primary key in schema
+                    is_primary_key: pk_indices.contains(&i),
                 })
+                .collect();
+
+            let primary_key: Vec<String> = pk_indices.iter()
+                .filter_map(|&i| table_info.schema.columns.get(i).map(|c| c.name.clone()))
                 .collect();
 
             Ok(Json(TableSchema {
                 name: table_info.name.clone(),
                 schema: "public".to_string(),
                 columns,
-                primary_key: vec![], // Would need to track this in schema
+                primary_key,
                 indexes: vec![],
-                row_count: 0,
-                size_bytes: 0,
+                row_count: table_info.row_count,
+                size_bytes: table_info.size_bytes,
             }))
         }
         None => {
@@ -561,37 +564,83 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<MetricsResponse>
 
 /// List CDC subscriptions
 pub async fn list_subscriptions(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> ApiResult<Json<Vec<CdcSubscription>>> {
     debug!("Listing CDC subscriptions");
 
-    // TODO: Query CDC system for subscriptions
-    Ok(Json(vec![]))
+    let manager = match state.cdc_manager() {
+        Some(m) => m,
+        None => return Ok(Json(vec![])),
+    };
+
+    let subs: Vec<CdcSubscription> = manager.list_subscriptions()
+        .into_iter()
+        .map(|s| {
+            let table = s.config.tables.first().cloned().unwrap_or_default();
+            CdcSubscription {
+                id: s.id.to_string(),
+                table,
+                operations: default_operations(),
+                status: format!("{:?}", s.status),
+                created_at: s.created_at.to_rfc3339(),
+                last_event_at: None,
+                event_count: 0,
+            }
+        })
+        .collect();
+
+    Ok(Json(subs))
 }
 
 /// Create a CDC subscription
 pub async fn create_subscription(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(config): Json<CreateSubscriptionRequest>,
 ) -> ApiResult<Json<CdcSubscription>> {
-    let subscription_id = uuid::Uuid::new_v4().to_string();
+    info!(table = %config.table, "Creating CDC subscription");
 
-    info!(
-        subscription_id = %subscription_id,
-        table = %config.table,
-        "Creating CDC subscription"
-    );
+    let manager = match state.cdc_manager() {
+        Some(m) => m,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiError::internal_error("CDC manager not available")),
+            ));
+        }
+    };
 
-    // TODO: Create actual CDC subscription
-    Ok(Json(CdcSubscription {
-        id: subscription_id,
-        table: config.table,
-        operations: config.operations,
-        status: "active".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        last_event_at: None,
-        event_count: 0,
-    }))
+    // Build CDC config from the request
+    // For internal CDC (capturing changes from ThunderDB's own tables),
+    // we create a lightweight subscription that listens to the WAL
+    let cdc_config = CdcConfig {
+        connector_type: ConnectorType::PostgreSQL,
+        url: String::new(), // Internal subscription - no external URL
+        tables: vec![config.table.clone()],
+        initial_position: CdcPosition::Beginning,
+        batch_size: 1000,
+        poll_interval_ms: 100,
+    };
+
+    match manager.create_subscription(cdc_config).await {
+        Ok(sub) => {
+            Ok(Json(CdcSubscription {
+                id: sub.id.to_string(),
+                table: config.table,
+                operations: config.operations,
+                status: format!("{:?}", sub.status),
+                created_at: sub.created_at.to_rfc3339(),
+                last_event_at: None,
+                event_count: 0,
+            }))
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to create CDC subscription");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::internal_error(format!("Failed to create subscription: {}", e))),
+            ))
+        }
+    }
 }
 
 // ============================================================================
@@ -600,33 +649,87 @@ pub async fn create_subscription(
 
 /// List foreign servers
 pub async fn list_foreign_servers(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> ApiResult<Json<Vec<ForeignServer>>> {
     debug!("Listing foreign servers");
 
-    // TODO: Query catalog for foreign servers
-    Ok(Json(vec![]))
+    let servers: Vec<ForeignServer> = state.foreign_servers()
+        .iter()
+        .map(|entry| {
+            let s = entry.value();
+            ForeignServer {
+                name: s.name.clone(),
+                server_type: s.server_type.clone(),
+                host: s.host.clone(),
+                port: s.port,
+                database: s.database.clone(),
+                status: s.status.clone(),
+            }
+        })
+        .collect();
+
+    Ok(Json(servers))
 }
 
 /// Create a foreign server
 pub async fn create_foreign_server(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(config): Json<CreateForeignServerRequest>,
 ) -> ApiResult<Json<ForeignServer>> {
     info!(
         name = %config.name,
         server_type = %config.server_type,
+        host = %config.host,
         "Creating foreign server"
     );
 
-    // TODO: Actually create the foreign server
+    // Validate server type
+    let valid_types = ["postgres", "mysql", "mongodb", "redis"];
+    if !valid_types.contains(&config.server_type.to_lowercase().as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::invalid_request(format!(
+                "Unsupported server type '{}'. Supported: {}",
+                config.server_type,
+                valid_types.join(", ")
+            ))),
+        ));
+    }
+
+    // Check for duplicate name
+    if state.foreign_servers().contains_key(&config.name) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::invalid_request(format!(
+                "Foreign server '{}' already exists",
+                config.name
+            ))),
+        ));
+    }
+
+    let entry = crate::ForeignServerEntry {
+        name: config.name.clone(),
+        server_type: config.server_type.clone(),
+        host: config.host.clone(),
+        port: config.port,
+        database: config.database.clone(),
+        username: config.username.clone(),
+        options: config.options.clone(),
+        status: "registered".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    state.foreign_servers().insert(config.name.clone(), entry);
+
+    info!(name = %config.name, "Foreign server registered");
+
     Ok(Json(ForeignServer {
         name: config.name,
         server_type: config.server_type,
         host: config.host,
         port: config.port,
         database: config.database,
-        status: "connected".to_string(),
+        status: "registered".to_string(),
     }))
 }
 

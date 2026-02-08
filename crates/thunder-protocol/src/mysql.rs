@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -15,8 +15,8 @@ use tracing::{debug, error, info, warn};
 
 use thunder_common::prelude::*;
 
-use crate::{AuthMethod, ConnectionLimiter, MaybeTlsStream, ProtocolConfig, ProtocolHandler, Session};
-use crate::auth::{mysql_native_password, mysql_caching_sha2};
+use crate::{ConnectionLimiter, MaybeTlsStream, ProtocolConfig, ProtocolHandler, Session};
+use crate::auth::mysql_native_password;
 use crate::postgres::{QueryExecutor, QueryResult, ColumnInfo};
 use crate::mysql_compat::MySqlCompat;
 
@@ -24,35 +24,61 @@ use crate::mysql_compat::MySqlCompat;
 // MySQL Protocol Constants
 // ============================================================================
 
+// Allow dead code for protocol constants - they define the complete protocol
+// even if not all constants are currently used
+#[allow(dead_code)]
 /// MySQL protocol version
 const PROTOCOL_VERSION: u8 = 10;
 
 /// Server version string
 const SERVER_VERSION: &str = "8.0.35-ThunderDB";
 
-// Capability flags
+// Capability flags - allow dead code for protocol completeness
+#[allow(dead_code)]
 const CLIENT_LONG_PASSWORD: u32 = 0x0001;
+#[allow(dead_code)]
 const CLIENT_FOUND_ROWS: u32 = 0x0002;
+#[allow(dead_code)]
 const CLIENT_LONG_FLAG: u32 = 0x0004;
+#[allow(dead_code)]
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0008;
+#[allow(dead_code)]
 const CLIENT_NO_SCHEMA: u32 = 0x0010;
+#[allow(dead_code)]
 const CLIENT_COMPRESS: u32 = 0x0020;
+#[allow(dead_code)]
 const CLIENT_ODBC: u32 = 0x0040;
+#[allow(dead_code)]
 const CLIENT_LOCAL_FILES: u32 = 0x0080;
+#[allow(dead_code)]
 const CLIENT_IGNORE_SPACE: u32 = 0x0100;
+#[allow(dead_code)]
 const CLIENT_PROTOCOL_41: u32 = 0x0200;
+#[allow(dead_code)]
 const CLIENT_INTERACTIVE: u32 = 0x0400;
+#[allow(dead_code)]
 const CLIENT_SSL: u32 = 0x0800;
+#[allow(dead_code)]
 const CLIENT_IGNORE_SIGPIPE: u32 = 0x1000;
+#[allow(dead_code)]
 const CLIENT_TRANSACTIONS: u32 = 0x2000;
+#[allow(dead_code)]
 const CLIENT_RESERVED: u32 = 0x4000;
+#[allow(dead_code)]
 const CLIENT_SECURE_CONNECTION: u32 = 0x8000;
+#[allow(dead_code)]
 const CLIENT_MULTI_STATEMENTS: u32 = 0x00010000;
+#[allow(dead_code)]
 const CLIENT_MULTI_RESULTS: u32 = 0x00020000;
+#[allow(dead_code)]
 const CLIENT_PS_MULTI_RESULTS: u32 = 0x00040000;
+#[allow(dead_code)]
 const CLIENT_PLUGIN_AUTH: u32 = 0x00080000;
+#[allow(dead_code)]
 const CLIENT_CONNECT_ATTRS: u32 = 0x00100000;
+#[allow(dead_code)]
 const CLIENT_PLUGIN_AUTH_LENENC_DATA: u32 = 0x00200000;
+#[allow(dead_code)]
 const CLIENT_DEPRECATE_EOF: u32 = 0x01000000;
 
 // Server capabilities
@@ -72,28 +98,50 @@ const SERVER_CAPABILITIES: u32 = CLIENT_LONG_PASSWORD
 const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
 const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
 
-// Command types
+// Command types - allow dead code for protocol completeness
+#[allow(dead_code)]
 const COM_SLEEP: u8 = 0x00;
+#[allow(dead_code)]
 const COM_QUIT: u8 = 0x01;
+#[allow(dead_code)]
 const COM_INIT_DB: u8 = 0x02;
+#[allow(dead_code)]
 const COM_QUERY: u8 = 0x03;
+#[allow(dead_code)]
 const COM_FIELD_LIST: u8 = 0x04;
+#[allow(dead_code)]
 const COM_CREATE_DB: u8 = 0x05;
+#[allow(dead_code)]
 const COM_DROP_DB: u8 = 0x06;
+#[allow(dead_code)]
 const COM_REFRESH: u8 = 0x07;
+#[allow(dead_code)]
 const COM_SHUTDOWN: u8 = 0x08;
+#[allow(dead_code)]
 const COM_STATISTICS: u8 = 0x09;
+#[allow(dead_code)]
 const COM_PROCESS_INFO: u8 = 0x0a;
+#[allow(dead_code)]
 const COM_CONNECT: u8 = 0x0b;
+#[allow(dead_code)]
 const COM_PROCESS_KILL: u8 = 0x0c;
+#[allow(dead_code)]
 const COM_DEBUG: u8 = 0x0d;
+#[allow(dead_code)]
 const COM_PING: u8 = 0x0e;
+#[allow(dead_code)]
 const COM_STMT_PREPARE: u8 = 0x16;
+#[allow(dead_code)]
 const COM_STMT_EXECUTE: u8 = 0x17;
+#[allow(dead_code)]
 const COM_STMT_SEND_LONG_DATA: u8 = 0x18;
+#[allow(dead_code)]
 const COM_STMT_CLOSE: u8 = 0x19;
+#[allow(dead_code)]
 const COM_STMT_RESET: u8 = 0x1a;
+#[allow(dead_code)]
 const COM_SET_OPTION: u8 = 0x1b;
+#[allow(dead_code)]
 const COM_STMT_FETCH: u8 = 0x1c;
 
 // Response packet headers
@@ -101,27 +149,48 @@ const OK_PACKET: u8 = 0x00;
 const EOF_PACKET: u8 = 0xfe;
 const ERR_PACKET: u8 = 0xff;
 
-// Column types
+// Column types - allow dead code for protocol completeness
+#[allow(dead_code)]
 const MYSQL_TYPE_DECIMAL: u8 = 0x00;
+#[allow(dead_code)]
 const MYSQL_TYPE_TINY: u8 = 0x01;
+#[allow(dead_code)]
 const MYSQL_TYPE_SHORT: u8 = 0x02;
+#[allow(dead_code)]
 const MYSQL_TYPE_LONG: u8 = 0x03;
+#[allow(dead_code)]
 const MYSQL_TYPE_FLOAT: u8 = 0x04;
+#[allow(dead_code)]
 const MYSQL_TYPE_DOUBLE: u8 = 0x05;
+#[allow(dead_code)]
 const MYSQL_TYPE_NULL: u8 = 0x06;
+#[allow(dead_code)]
 const MYSQL_TYPE_TIMESTAMP: u8 = 0x07;
+#[allow(dead_code)]
 const MYSQL_TYPE_LONGLONG: u8 = 0x08;
+#[allow(dead_code)]
 const MYSQL_TYPE_INT24: u8 = 0x09;
+#[allow(dead_code)]
 const MYSQL_TYPE_DATE: u8 = 0x0a;
+#[allow(dead_code)]
 const MYSQL_TYPE_TIME: u8 = 0x0b;
+#[allow(dead_code)]
 const MYSQL_TYPE_DATETIME: u8 = 0x0c;
+#[allow(dead_code)]
 const MYSQL_TYPE_YEAR: u8 = 0x0d;
+#[allow(dead_code)]
 const MYSQL_TYPE_VARCHAR: u8 = 0x0f;
+#[allow(dead_code)]
 const MYSQL_TYPE_BIT: u8 = 0x10;
+#[allow(dead_code)]
 const MYSQL_TYPE_JSON: u8 = 0xf5;
+#[allow(dead_code)]
 const MYSQL_TYPE_NEWDECIMAL: u8 = 0xf6;
+#[allow(dead_code)]
 const MYSQL_TYPE_BLOB: u8 = 0xfc;
+#[allow(dead_code)]
 const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
+#[allow(dead_code)]
 const MYSQL_TYPE_STRING: u8 = 0xfe;
 
 // ============================================================================
@@ -195,6 +264,7 @@ struct MySqlConnection<E: QueryExecutor> {
     /// Stream wrapped in Option to allow taking ownership for TLS upgrade
     stream: Option<MaybeTlsStream<TcpStream>>,
     executor: Arc<E>,
+    #[allow(dead_code)]
     config: ProtocolConfig,
     session: Session,
     session_id: Option<uuid::Uuid>,
@@ -215,6 +285,7 @@ struct MySqlConnection<E: QueryExecutor> {
 struct PreparedStatementInfo {
     query: String,
     param_count: usize,
+    #[allow(dead_code)]
     column_count: usize,
 }
 

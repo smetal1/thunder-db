@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "thunderdb.labels" . | nindent 4 }}
 spec:
-  serviceName: {{ include "thunderdb.fullname" . }}
+  serviceName: {{ include "thunderdb.fullname" . }}-headless
   replicas: {{ .Values.replicaCount }}
   updateStrategy:
     type: RollingUpdate
@@ -39,9 +39,37 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
-            - thunderdb
-            - --config
-            - /etc/thunderdb/thunderdb.toml
+            - /bin/sh
+            - -c
+            - |
+              # Extract ordinal from pod name (e.g., thunderdb-0 -> 0)
+              ORDINAL=$(echo $POD_NAME | rev | cut -d'-' -f1 | rev)
+              # Node ID is ordinal + 1 (so thunderdb-0 = node 1)
+              export THUNDERDB_NODE_ID=$((ORDINAL + 1))
+              # First node is seed
+              if [ "$ORDINAL" = "0" ]; then
+                export THUNDERDB_IS_SEED=true
+              else
+                export THUNDERDB_IS_SEED=false
+              fi
+              # Resolve seed node DNS to IP (with retry for initial startup)
+              SEED_DNS="${STATEFULSET_NAME}-0.${HEADLESS_SERVICE}.${POD_NAMESPACE}.svc.cluster.local"
+              for i in $(seq 1 30); do
+                SEED_IP=$(getent hosts $SEED_DNS | awk '{print $1}' | head -1)
+                if [ -n "$SEED_IP" ]; then
+                  break
+                fi
+                echo "Waiting for seed node DNS resolution ($SEED_DNS)... attempt $i"
+                sleep 2
+              done
+              if [ -n "$SEED_IP" ]; then
+                export THUNDERDB_SEEDS="${SEED_IP}:${THUNDERDB_GRPC_PORT}"
+              else
+                echo "Warning: Could not resolve seed DNS, starting without seeds"
+                export THUNDERDB_SEEDS=""
+              fi
+              echo "Starting ThunderDB node ${THUNDERDB_NODE_ID} (is_seed=${THUNDERDB_IS_SEED}, seeds=${THUNDERDB_SEEDS})"
+              exec thunderdb --config /etc/thunderdb/thunderdb.toml
           ports:
             - name: postgres
               containerPort: {{ .Values.service.ports.postgres }}
@@ -64,6 +92,23 @@ spec:
                 secretKeyRef:
                   name: {{ include "thunderdb.secretName" . }}
                   key: {{ .Values.credentials.existingSecretKey }}
+            # Cluster configuration via environment variables
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: THUNDERDB_CLUSTER_NAME
+              value: {{ .Values.config.cluster.name | quote }}
+            - name: THUNDERDB_GRPC_PORT
+              value: {{ .Values.service.ports.grpc | quote }}
+            - name: HEADLESS_SERVICE
+              value: "{{ include "thunderdb.fullname" . }}-headless"
+            - name: STATEFULSET_NAME
+              value: "{{ include "thunderdb.fullname" . }}"
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

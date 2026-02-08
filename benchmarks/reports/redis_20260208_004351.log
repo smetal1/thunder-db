@@ -1,0 +1,2 @@
+error: error from server (NotFound): jobs.batch "thunderdb-redis-benchmark" not found in namespace "thunderdb"
+

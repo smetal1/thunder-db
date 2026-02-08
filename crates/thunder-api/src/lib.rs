@@ -18,13 +18,16 @@ pub mod rest;
 pub mod sql_validator;
 pub mod websocket;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::{routing::{get, post}, Router};
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use thunder_cdc::connector::ConnectorManager;
 use thunder_common::prelude::*;
 
 pub use dashboard::dashboard_router;
@@ -80,6 +83,12 @@ pub struct EngineStats {
 pub struct CatalogTableInfo {
     pub name: String,
     pub schema: Schema,
+    /// Primary key column indices
+    pub primary_key: Vec<usize>,
+    /// Estimated row count
+    pub row_count: u64,
+    /// Size in bytes
+    pub size_bytes: u64,
 }
 
 /// Trait for database engines that can execute queries
@@ -186,15 +195,33 @@ pub struct AppState {
     inner: Arc<AppStateInner>,
 }
 
+/// Stored foreign server entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForeignServerEntry {
+    pub name: String,
+    pub server_type: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: Option<String>,
+    pub options: Option<serde_json::Value>,
+    pub status: String,
+    pub created_at: String,
+}
+
 struct AppStateInner {
     start_time: Instant,
     metrics: RwLock<ServerMetrics>,
     /// Database engine (optional - can be None for testing)
     engine: Option<Arc<dyn QueryEngine>>,
     /// Session mapping: API session ID -> Engine session ID
-    sessions: RwLock<std::collections::HashMap<String, uuid::Uuid>>,
+    sessions: RwLock<HashMap<String, uuid::Uuid>>,
     /// Prometheus-compatible database metrics
     db_metrics: Arc<thunder_common::metrics::DatabaseMetrics>,
+    /// CDC connector manager
+    cdc_manager: Option<Arc<ConnectorManager>>,
+    /// Foreign server registry
+    foreign_servers: DashMap<String, ForeignServerEntry>,
 }
 
 impl AppState {
@@ -205,8 +232,10 @@ impl AppState {
                 start_time: Instant::now(),
                 metrics: RwLock::new(ServerMetrics::default()),
                 engine: None,
-                sessions: RwLock::new(std::collections::HashMap::new()),
+                sessions: RwLock::new(HashMap::new()),
                 db_metrics: Arc::new(thunder_common::metrics::DatabaseMetrics::new()),
+                cdc_manager: None,
+                foreign_servers: DashMap::new(),
             }),
         }
     }
@@ -218,8 +247,25 @@ impl AppState {
                 start_time: Instant::now(),
                 metrics: RwLock::new(ServerMetrics::default()),
                 engine: Some(engine),
-                sessions: RwLock::new(std::collections::HashMap::new()),
+                sessions: RwLock::new(HashMap::new()),
                 db_metrics: Arc::new(thunder_common::metrics::DatabaseMetrics::new()),
+                cdc_manager: None,
+                foreign_servers: DashMap::new(),
+            }),
+        }
+    }
+
+    /// Create a new AppState with engine and CDC manager
+    pub fn with_engine_and_cdc(engine: Arc<dyn QueryEngine>, cdc_manager: Arc<ConnectorManager>) -> Self {
+        Self {
+            inner: Arc::new(AppStateInner {
+                start_time: Instant::now(),
+                metrics: RwLock::new(ServerMetrics::default()),
+                engine: Some(engine),
+                sessions: RwLock::new(HashMap::new()),
+                db_metrics: Arc::new(thunder_common::metrics::DatabaseMetrics::new()),
+                cdc_manager: Some(cdc_manager),
+                foreign_servers: DashMap::new(),
             }),
         }
     }
@@ -287,6 +333,16 @@ impl AppState {
     /// Get the Prometheus-compatible database metrics
     pub fn db_metrics(&self) -> &Arc<thunder_common::metrics::DatabaseMetrics> {
         &self.inner.db_metrics
+    }
+
+    /// Get the CDC connector manager
+    pub fn cdc_manager(&self) -> Option<&Arc<ConnectorManager>> {
+        self.inner.cdc_manager.as_ref()
+    }
+
+    /// Get the foreign server registry
+    pub fn foreign_servers(&self) -> &DashMap<String, ForeignServerEntry> {
+        &self.inner.foreign_servers
     }
 }
 

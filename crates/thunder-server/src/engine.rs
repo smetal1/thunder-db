@@ -2462,6 +2462,9 @@ impl QueryEngine for DatabaseEngine {
         DatabaseEngine::get_table(self, name).map(|info| CatalogTableInfo {
             name: info.name.clone(),
             schema: info.schema.clone(),
+            primary_key: info.primary_key.clone(),
+            row_count: info.stats.row_count,
+            size_bytes: info.stats.size_bytes,
         })
     }
 

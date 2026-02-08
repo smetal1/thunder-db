@@ -43,6 +43,8 @@ pub struct PostgresConnector {
     current_txn: Option<TransactionState>,
     /// Table column cache
     column_cache: HashMap<String, Vec<ColumnDef>>,
+    /// Database name (resolved from connection)
+    database_name: String,
     /// Decoder type
     decoder: DecoderType,
     /// Poll interval
@@ -92,6 +94,12 @@ impl PostgresConnector {
         let slot_name = format!("thunder_cdc_{}", uuid::Uuid::new_v4().simple());
         let publication_name = "thunder_publication".to_string();
 
+        // Extract database name from connection URL
+        let database_name = config.url.parse::<Config>()
+            .ok()
+            .and_then(|c| c.get_dbname().map(String::from))
+            .unwrap_or_else(|| "postgres".to_string());
+
         Ok(Self {
             config,
             client: None,
@@ -102,6 +110,7 @@ impl PostgresConnector {
             pending_events: Vec::new(),
             current_txn: None,
             column_cache: HashMap::new(),
+            database_name,
             decoder: DecoderType::PgOutput,
             poll_interval: Duration::from_millis(100),
             last_poll: std::time::Instant::now(),
@@ -400,7 +409,7 @@ impl PostgresConnector {
 
             return Some(CdcEvent {
                 source: "postgres".to_string(),
-                database: "postgres".to_string(), // TODO: Get from connection
+                database: self.database_name.clone(),
                 schema: Some(schema),
                 table,
                 operation,

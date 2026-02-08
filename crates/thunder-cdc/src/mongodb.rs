@@ -397,8 +397,8 @@ fn value_to_bson(value: &Value) -> Bson {
             bytes: b.to_vec(),
         }),
         Value::Timestamp(ts) => Bson::DateTime(bson::DateTime::from_millis(*ts / 1000)), // Convert microseconds to milliseconds
-        Value::Date(d) => Bson::String(d.to_string()),
-        Value::Time(t) => Bson::String(t.to_string()),
+        v @ Value::Date(_) => Bson::String(format!("{}", v)),
+        v @ Value::Time(_) => Bson::String(format!("{}", v)),
         Value::Uuid(u) => Bson::String(hex::encode(u)),
         Value::Array(arr) => {
             let bson_arr: Vec<Bson> = arr.iter().map(value_to_bson).collect();
