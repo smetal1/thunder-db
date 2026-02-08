@@ -1092,6 +1092,33 @@ impl<E: QueryExecutor> PostgresConnection<E> {
                     // Send row description (if SELECT)
                     if !stmt.columns.is_empty() {
                         self.send_row_description(&stmt.columns).await?;
+                    } else if stmt.query.trim_start().get(..6).map(|s| s.eq_ignore_ascii_case("select")).unwrap_or(false) {
+                        // For SELECT queries, discover columns by executing with NULL params
+                        let mut discovered = false;
+                        if let Some(session_id) = self.session_id {
+                            let dummy_query = self.replace_params_with_null(&stmt.query);
+                            if let Ok(result) = self.executor.execute(session_id, &dummy_query).await {
+                                if !result.columns.is_empty() {
+                                    self.send_row_description(&result.columns).await?;
+                                    if let Some(ps) = self.prepared_statements.get_mut(&name) {
+                                        ps.columns = result.columns;
+                                    }
+                                    discovered = true;
+                                }
+                            }
+                        }
+                        if !discovered {
+                            // Fall back: parse column names from SELECT clause
+                            let cols = Self::infer_select_columns(&stmt.query);
+                            if cols.is_empty() {
+                                self.send_no_data().await?;
+                            } else {
+                                self.send_row_description(&cols).await?;
+                                if let Some(ps) = self.prepared_statements.get_mut(&name) {
+                                    ps.columns = cols;
+                                }
+                            }
+                        }
                     } else {
                         self.send_no_data().await?;
                     }
@@ -1241,6 +1268,55 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             result = result.replace(&placeholder, &value);
         }
         Ok(result)
+    }
+
+    /// Replace all $N parameter placeholders with NULL for column discovery.
+    fn replace_params_with_null(&self, query: &str) -> String {
+        let mut result = query.to_string();
+        for i in (1..=99).rev() {
+            result = result.replace(&format!("${}", i), "NULL");
+        }
+        result
+    }
+
+    /// Infer column names from a SELECT query by simple text parsing.
+    /// Falls back for Describe(Statement) when execution-based discovery fails.
+    fn infer_select_columns(query: &str) -> Vec<ColumnInfo> {
+        let trimmed = query.trim();
+        // Find text between SELECT and FROM (case-insensitive)
+        let upper = trimmed.to_uppercase();
+        let select_pos = match upper.find("SELECT") {
+            Some(p) => p + 6,
+            None => return vec![],
+        };
+        let from_pos = upper.find(" FROM ").unwrap_or(trimmed.len());
+        if select_pos >= from_pos {
+            return vec![];
+        }
+
+        let columns_str = &trimmed[select_pos..from_pos];
+        columns_str
+            .split(',')
+            .map(|col| {
+                let col = col.trim();
+                // Handle "expr AS alias" and bare column names
+                let name = if let Some(alias_pos) = col.to_uppercase().rfind(" AS ") {
+                    col[alias_pos + 4..].trim()
+                } else {
+                    // Use last dot-separated part (e.g., "t.col" -> "col")
+                    col.rsplit('.').next().unwrap_or(col).trim()
+                };
+                ColumnInfo {
+                    name: name.to_string(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: 25, // TEXT
+                    type_size: -1,
+                    type_modifier: -1,
+                    format: 0,
+                }
+            })
+            .collect()
     }
 
     async fn handle_sync(&mut self) -> Result<()> {
