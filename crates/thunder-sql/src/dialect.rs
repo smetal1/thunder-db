@@ -3,7 +3,6 @@
 //! Auto-detects and translates between PostgreSQL, MySQL, MongoDB, and Redis syntax.
 //! Converts all dialects to ThunderDB's internal SQL representation.
 
-use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value as JsonValue;
 

@@ -26,10 +26,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use thunder_common::prelude::*;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::membership::{HealthStatus, Membership, MembershipEvent, NodeMeta};
-use crate::transport::NetworkTransport;
+use crate::membership::{Membership, NodeMeta};
 use crate::NodeStatus;
 
 /// Gossip configuration
@@ -1033,6 +1032,7 @@ impl Gossiper {
     }
 
     /// Mark a node as alive (when it comes back)
+    #[allow(dead_code)]
     fn mark_alive(&self, node_id: NodeId) {
         if let Some(mut entry) = self.endpoints.get_mut(&node_id) {
             if !entry.is_alive {
@@ -1252,7 +1252,7 @@ mod tests {
         );
 
         // Add another endpoint
-        let mut ep = EndpointState::new(NodeId(2), test_addr(5002));
+        let ep = EndpointState::new(NodeId(2), test_addr(5002));
         ep.heartbeat.increment();
         ep.heartbeat.increment();
         gossiper.endpoints.insert(NodeId(2), ep);
@@ -1274,7 +1274,7 @@ mod tests {
         );
 
         // Add node 2 with version 5
-        let mut ep2 = EndpointState::new(NodeId(2), test_addr(5002));
+        let ep2 = EndpointState::new(NodeId(2), test_addr(5002));
         for _ in 0..5 {
             ep2.heartbeat.increment();
         }

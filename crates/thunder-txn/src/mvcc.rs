@@ -13,8 +13,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
-use std::collections::{HashMap, HashSet};
+use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thunder_common::error::TransactionError;
@@ -145,6 +145,7 @@ struct MvccTransaction {
 
 /// Undo record for transaction rollback.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct UndoRecord {
     table_id: TableId,
     row_id: RowId,
@@ -156,9 +157,9 @@ enum UndoOperation {
     /// Delete the inserted row
     DeleteInsert,
     /// Restore the old version
-    RestoreUpdate(Row),
+    RestoreUpdate(#[allow(dead_code)] Row),
     /// Undelete the row
-    RestoreDelete(Row),
+    RestoreDelete(#[allow(dead_code)] Row),
 }
 
 /// MVCC transaction manager implementation.
@@ -485,7 +486,7 @@ impl MvccTransactionManager {
             .remove(&txn_id)
             .ok_or_else(|| Error::NotFound("Transaction".into(), txn_id.0.to_string()))?;
 
-        let txn = txn_entry.1.into_inner();
+        let _txn = txn_entry.1.into_inner();
 
         // Assign commit timestamp
         let commit_ts = TxnId(self.next_txn_id.fetch_add(1, Ordering::SeqCst));
@@ -508,7 +509,7 @@ impl MvccTransactionManager {
     }
 
     /// Abort a transaction.
-    pub async fn abort_txn(&self, txn_id: TxnId, reason: AbortReason) -> Result<()> {
+    pub async fn abort_txn(&self, txn_id: TxnId, _reason: AbortReason) -> Result<()> {
         // Remove from active set
         let txn_entry = self
             .active_txns

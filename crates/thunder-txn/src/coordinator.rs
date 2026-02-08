@@ -10,12 +10,11 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thunder_common::prelude::*;
-use tokio::sync::mpsc;
 
 /// Participant ID (node ID in the cluster).
 pub type ParticipantId = u64;
@@ -105,6 +104,7 @@ pub enum PrepareVote {
 
 /// Distributed transaction info.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct DistributedTxn {
     /// Transaction ID
     txn_id: TxnId,
@@ -133,6 +133,7 @@ impl DistributedTxn {
         }
     }
 
+    #[allow(dead_code)]
     fn is_timed_out(&self) -> bool {
         self.start_time.elapsed() > self.timeout
     }
@@ -143,18 +144,21 @@ impl DistributedTxn {
             .all(|s| *s == ParticipantState::Prepared)
     }
 
+    #[allow(dead_code)]
     fn any_aborted(&self) -> bool {
         self.participants
             .values()
             .any(|s| *s == ParticipantState::Aborted)
     }
 
+    #[allow(dead_code)]
     fn all_committed(&self) -> bool {
         self.participants
             .values()
             .all(|s| *s == ParticipantState::Committed)
     }
 
+    #[allow(dead_code)]
     fn all_abort_acked(&self) -> bool {
         self.participants
             .values()

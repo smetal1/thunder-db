@@ -14,9 +14,9 @@ use chrono::{DateTime, Utc};
 use redis::{
     aio::MultiplexedConnection,
     streams::{StreamReadOptions, StreamReadReply},
-    AsyncCommands, Client, FromRedisValue, RedisResult, Value as RedisValue,
+    AsyncCommands, Client, RedisResult, Value as RedisValue,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::{CdcConfig, CdcConnector, CdcEvent, CdcOperation, CdcPosition};
 use thunder_common::prelude::*;

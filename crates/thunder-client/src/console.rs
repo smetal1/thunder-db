@@ -85,6 +85,7 @@ struct ConsoleState {
     user: String,
     output_format: OutputFormat,
     in_transaction: bool,
+    #[allow(dead_code)]
     auto_commit: bool,
     timing: bool,
     running: Arc<AtomicBool>,
@@ -198,6 +199,7 @@ struct QueryRequest {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct QueryResponse {
     query_id: String,
     columns: Vec<ColumnInfo>,
@@ -207,6 +209,7 @@ struct QueryResponse {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct ColumnInfo {
     name: String,
     data_type: String,
@@ -214,6 +217,7 @@ struct ColumnInfo {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct ApiError {
     code: String,
     message: String,

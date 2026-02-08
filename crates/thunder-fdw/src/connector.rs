@@ -9,14 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
 
 use crate::{
-    ColumnStatistics, FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer,
-    ForeignTableDef, ModifyOperation, Qual, QualOperator,
+    ColumnStatistics, ForeignDataWrapper, ForeignServer, Qual, QualOperator,
 };
 use thunder_common::prelude::*;
 

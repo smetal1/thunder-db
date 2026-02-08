@@ -6,16 +6,15 @@
 //! - Position tracking and checkpointing
 //! - Health monitoring and recovery
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{BoxStream, StreamExt};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -45,6 +44,7 @@ pub struct ConnectorManager {
 }
 
 /// State of a running connector
+#[allow(dead_code)]
 struct ConnectorState {
     /// The actual connector
     connector: Box<dyn CdcConnector>,
@@ -65,6 +65,7 @@ struct ConnectorState {
 }
 
 /// Control messages for connectors
+#[allow(dead_code)]
 enum ConnectorControl {
     Start,
     Pause,

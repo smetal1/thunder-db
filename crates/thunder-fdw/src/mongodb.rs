@@ -21,7 +21,7 @@ use mongodb::{
     options::ClientOptions,
     Client, Collection,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     ColumnStatistics, FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer,
@@ -190,6 +190,7 @@ impl MongoFdw {
     }
 
     /// Infer schema from sample documents
+    #[allow(dead_code)]
     async fn infer_schema(&mut self) -> Result<Schema> {
         if let Some(schema) = &self.cached_schema {
             return Ok(schema.clone());
@@ -242,11 +243,12 @@ impl MongoFdw {
     }
 
     /// Refresh statistics
+    #[allow(dead_code)]
     async fn refresh_statistics(&mut self) -> Result<()> {
         let collection = self.get_collection()?;
 
         // Get total count
-        let total_count = collection
+        let _total_count = collection
             .count_documents(None, None)
             .await
             .map_err(|e| Error::Internal(format!("Count failed: {}", e)))?;
@@ -502,6 +504,7 @@ pub struct MongoScan {
     /// Batch size
     batch_size: usize,
     /// Columns to return
+    #[allow(dead_code)]
     columns: Vec<String>,
 }
 
@@ -649,6 +652,7 @@ fn value_to_bson(value: &Value) -> Bson {
 }
 
 /// Convert BSON to Value
+#[allow(dead_code)]
 fn bson_to_value(bson: &Bson) -> Value {
     match bson {
         Bson::Null => Value::Null,

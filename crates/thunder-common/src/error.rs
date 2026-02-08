@@ -88,6 +88,9 @@ pub enum StorageError {
     #[error("Buffer pool full")]
     BufferPoolFull,
 
+    #[error("Page full")]
+    PageFull,
+
     #[error("WAL write failed: {0}")]
     WalWriteFailed(String),
 
@@ -255,6 +258,7 @@ impl Error {
                 StorageError::PageNotFound(_) => "58030",   // io_error
                 StorageError::PageCorrupted(_) => "XX001",  // data_corrupted
                 StorageError::BufferPoolFull => "53200",    // too_many_connections (resource)
+                StorageError::PageFull => "54000",          // program_limit_exceeded
                 StorageError::WalWriteFailed(_) => "58030", // io_error
                 StorageError::CheckpointFailed(_) => "58030",
                 StorageError::IndexError(_) => "XX000",     // internal_error
@@ -395,6 +399,7 @@ mod tests {
             Error::Storage(StorageError::PageNotFound(0)),
             Error::Storage(StorageError::PageCorrupted(0)),
             Error::Storage(StorageError::BufferPoolFull),
+            Error::Storage(StorageError::PageFull),
             Error::Storage(StorageError::DiskFull),
             Error::Transaction(TransactionError::Deadlock),
             Error::Transaction(TransactionError::LockTimeout),

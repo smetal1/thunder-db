@@ -35,7 +35,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
 
@@ -302,6 +301,7 @@ impl Default for DatasetSplits {
 /// Dataset builder for creating training datasets
 pub struct DatasetBuilder {
     name: String,
+    #[allow(dead_code)]
     query: String,
     features: Vec<FeatureColumn>,
     label_column: Option<String>,

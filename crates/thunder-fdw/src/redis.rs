@@ -13,7 +13,7 @@ use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use async_trait::async_trait;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     ColumnStatistics, FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer,
@@ -118,6 +118,7 @@ impl RedisFdw {
     }
 
     /// Get connection reference
+    #[allow(dead_code)]
     fn connection(&mut self) -> Result<&mut MultiplexedConnection> {
         self.connection
             .as_mut()
@@ -140,6 +141,7 @@ impl RedisFdw {
     }
 
     /// Infer schema from sample keys
+    #[allow(dead_code)]
     async fn infer_schema(&mut self) -> Result<Schema> {
         if let Some(schema) = &self.hash_schema {
             return Ok(schema.clone());

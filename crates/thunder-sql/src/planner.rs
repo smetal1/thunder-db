@@ -252,7 +252,7 @@ impl ColumnCollector {
                 self.visit_expr(low);
                 self.visit_expr(high);
             }
-            Expr::Subquery(plan) => {
+            Expr::Subquery(_plan) => {
                 // Would need to recursively collect from subquery
             }
             Expr::Cast { expr, .. } => {
@@ -306,7 +306,7 @@ impl<'a> CostEstimator<'a> {
     /// Estimate the cost of a plan
     pub fn estimate(&self, plan: &LogicalPlan) -> PlanCost {
         match plan {
-            LogicalPlan::Scan { table, filter, projection, .. } => {
+            LogicalPlan::Scan { table, filter,  .. } => {
                 let table_info = self.catalog.get_table(table);
                 let base_rows = table_info
                     .map(|t| t.stats.row_count as f64)
@@ -387,7 +387,7 @@ impl<'a> CostEstimator<'a> {
                 )
             }
 
-            LogicalPlan::Sort { input, order_by } => {
+            LogicalPlan::Sort { input, order_by: _ } => {
                 let input_cost = self.estimate(input);
                 let n = input_cost.rows;
 
@@ -528,7 +528,7 @@ pub fn format_plan(plan: &LogicalPlan, indent: usize) -> String {
             ));
         }
 
-        LogicalPlan::Update { table, assignments, filter } => {
+        LogicalPlan::Update { table, assignments, filter: _ } => {
             result.push_str(&format!(
                 "{}Update: {} ({} assignments)\n",
                 prefix,
@@ -537,7 +537,7 @@ pub fn format_plan(plan: &LogicalPlan, indent: usize) -> String {
             ));
         }
 
-        LogicalPlan::Delete { table, filter } => {
+        LogicalPlan::Delete { table, filter: _ } => {
             result.push_str(&format!("{}Delete: {}\n", prefix, table));
         }
 

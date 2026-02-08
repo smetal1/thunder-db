@@ -12,7 +12,6 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::AppState;
 
@@ -297,7 +296,7 @@ fn value_to_json(value: &thunder_common::types::Value) -> serde_json::Value {
 /// Get performance metrics
 async fn get_performance(State(state): State<AppState>) -> Json<PerformanceMetrics> {
     // In a real implementation, these would be collected over time
-    let metrics = state.metrics();
+    let _metrics = state.metrics();
     let now = chrono::Utc::now().timestamp();
 
     // Generate sample data points for the last hour

@@ -19,7 +19,7 @@ use parking_lot::RwLock;
 use rand::prelude::*;
 
 use thunder_common::prelude::*;
-use crate::{DistanceFunction, HnswConfig, IndexStats, SearchResult, VectorFilter, VectorIndex};
+use crate::{HnswConfig, IndexStats, SearchResult, VectorFilter, VectorIndex};
 
 // ============================================================================
 // Data Structures
@@ -29,6 +29,7 @@ use crate::{DistanceFunction, HnswConfig, IndexStats, SearchResult, VectorFilter
 #[derive(Debug, Clone)]
 struct HnswNode {
     /// Unique identifier
+    #[allow(dead_code)]
     id: u64,
     /// The vector data
     vector: Vec<f32>,

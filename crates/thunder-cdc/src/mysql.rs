@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
-use sqlx::{mysql::MySqlPoolOptions, MySql, Pool, Row as SqlxRow};
-use tracing::{debug, error, info, warn};
+use chrono::Utc;
+use sqlx::{mysql::MySqlPoolOptions, MySql, Pool};
+use tracing::{debug, info};
 
 use crate::{CdcConfig, CdcConnector, CdcEvent, CdcOperation, CdcPosition};
 use thunder_common::prelude::*;
@@ -22,6 +22,7 @@ use thunder_common::prelude::*;
 // ============================================================================
 
 /// MySQL CDC connector using binary log replication
+#[allow(dead_code)]
 pub struct MySqlConnector {
     /// Configuration
     config: CdcConfig,
@@ -48,6 +49,7 @@ pub struct MySqlConnector {
 
 /// Cached table schema
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TableSchema {
     database: String,
     table: String,
@@ -57,6 +59,7 @@ struct TableSchema {
 
 /// Column schema
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ColumnSchema {
     name: String,
     column_type: String,
@@ -67,6 +70,7 @@ struct ColumnSchema {
 
 /// Binlog event types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum BinlogEventType {
     Unknown,
     QueryEvent,
@@ -339,7 +343,7 @@ impl MySqlConnector {
         let table_info = self.extract_table_from_info(info)?;
 
         let (database, table) = table_info;
-        let schema = self.schema_cache.get(&format!("{}.{}", database, table))?;
+        let _schema = self.schema_cache.get(&format!("{}.{}", database, table))?;
 
         // For SHOW BINLOG EVENTS, we can't get actual row data
         // In production, use replication protocol or mysqlbinlog

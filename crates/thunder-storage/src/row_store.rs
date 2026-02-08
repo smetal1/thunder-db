@@ -6,8 +6,8 @@
 //! - Free space management
 
 use crate::buffer::BufferPoolImpl;
-use crate::page::{TupleHeader, TUPLE_HEADER_SIZE};
-use crate::wal::{WalWriterImpl, InsertRecord, DeleteRecord};
+use crate::page::{TupleHeader, TUPLE_HEADER_SIZE, SLOT_ENTRY_SIZE, MIN_FREE_SPACE};
+use crate::wal::{WalWriterImpl, InsertRecord};
 use crate::{RowIterator, WalEntry, WalEntryType, WalWriter};
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -154,6 +154,7 @@ impl FreeSpaceMap {
     }
 
     /// Minimum free space for each bucket (for finding appropriate bucket).
+    #[allow(dead_code)]
     #[inline]
     fn bucket_min_size(bucket: usize) -> u16 {
         match bucket {
@@ -301,11 +302,16 @@ impl RowStoreImpl {
         }
 
         // Create first page for table
-        let (page_id, _guard) = self.buffer_pool.new_page()?;
+        let (page_id, guard) = self.buffer_pool.new_page()?;
+        let free_space = guard.free_space() as u16;
+        drop(guard);
+
         self.table_first_page.insert(table_id, page_id);
-        self.table_fsm
+        let fsm = self.table_fsm
             .entry(table_id)
             .or_insert_with(FreeSpaceMap::new);
+        // Register the new page in the FSM so find_page() can locate it
+        fsm.update(page_id, free_space);
         self.next_row_id
             .entry(table_id)
             .or_insert_with(|| AtomicU64::new(1));
@@ -370,7 +376,8 @@ impl RowStoreImpl {
     ) -> Result<RowId> {
         let row_id = self.allocate_row_id(table_id);
         let tuple_data = self.encode_row(txn_id, &row);
-        let needed_space = tuple_data.len() as u16;
+        // Account for slot entry and minimum free space overhead that can_fit() requires
+        let needed_space = (tuple_data.len() + SLOT_ENTRY_SIZE + MIN_FREE_SPACE) as u16;
 
         // Find or create a page with enough space
         let page_id = if let Some(fsm) = self.table_fsm.get(&table_id) {
@@ -386,24 +393,45 @@ impl RowStoreImpl {
             self.get_or_create_first_page(table_id)?
         };
 
-        // Insert tuple into page
+        // Insert tuple into page, falling back to a new page if it's full
         let mut guard = self.buffer_pool.fetch_page_mut(page_id)?;
-        let slot_id = guard.page_mut().insert_tuple(&tuple_data)?;
+        let (final_page_id, slot_id) = match guard.page_mut().insert_tuple(&tuple_data) {
+            Ok(slot_id) => {
+                // Update FSM with actual remaining free space
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(page_id, guard.free_space() as u16);
+                }
+                drop(guard);
+                (page_id, slot_id)
+            }
+            Err(_) => {
+                // Page was full despite FSM suggesting it had space — update FSM and retry
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(page_id, guard.free_space() as u16);
+                }
+                drop(guard);
 
-        // Update free space map
-        if let Some(fsm) = self.table_fsm.get(&table_id) {
-            fsm.update(page_id, guard.free_space() as u16);
-        }
-
-        drop(guard);
+                let (new_page_id, _) = self.buffer_pool.new_page()?;
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(new_page_id, crate::PAGE_SIZE as u16);
+                }
+                let mut new_guard = self.buffer_pool.fetch_page_mut(new_page_id)?;
+                let slot_id = new_guard.page_mut().insert_tuple(&tuple_data)?;
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(new_page_id, new_guard.free_space() as u16);
+                }
+                drop(new_guard);
+                (new_page_id, slot_id)
+            }
+        };
 
         // Register row location for O(1) lookups
-        self.row_locator.insert(table_id, row_id, page_id, slot_id);
+        self.row_locator.insert(table_id, row_id, final_page_id, slot_id);
 
         // Write WAL record with full InsertRecord format for recovery
         let insert_record = InsertRecord {
             row_id,
-            page_id,
+            page_id: final_page_id,
             slot_id,
             tuple_data: tuple_data.clone(),
         };
@@ -444,6 +472,9 @@ impl RowStoreImpl {
         let rows_per_page = (crate::PAGE_SIZE - 100) / avg_row_size;
         let pages_needed = (batch_size + rows_per_page - 1) / rows_per_page;
 
+        // Account for slot entry and minimum free space overhead
+        let page_overhead = (SLOT_ENTRY_SIZE + MIN_FREE_SPACE) as u16;
+
         // Ensure we have enough pages pre-allocated
         let mut available_pages = Vec::with_capacity(pages_needed);
         for _ in 0..pages_needed {
@@ -451,7 +482,7 @@ impl RowStoreImpl {
                 .entry(table_id)
                 .or_insert_with(FreeSpaceMap::new);
 
-            let page_id = if let Some(pid) = fsm.find_page(avg_row_size as u16) {
+            let page_id = if let Some(pid) = fsm.find_page(avg_row_size as u16 + page_overhead) {
                 pid
             } else {
                 let (page_id, _) = self.buffer_pool.new_page()?;
@@ -466,7 +497,7 @@ impl RowStoreImpl {
         for row in rows {
             let row_id = self.allocate_row_id(table_id);
             let tuple_data = self.encode_row(txn_id, &row);
-            let needed_space = tuple_data.len() as u16;
+            let needed_space = tuple_data.len() as u16 + page_overhead;
 
             // Find a page with enough space from our pre-allocated pool
             let page_id = loop {
@@ -481,30 +512,52 @@ impl RowStoreImpl {
 
                 let pid = available_pages[page_idx];
                 let guard = self.buffer_pool.fetch_page(pid)?;
-                if guard.free_space() as u16 >= needed_space {
+                let has_space = guard.free_space() as u16 >= needed_space;
+                drop(guard);
+                if has_space {
                     break pid;
                 }
                 page_idx += 1;
             };
 
-            // Insert tuple into page
+            // Insert tuple into page, falling back to a new page if full
             let mut guard = self.buffer_pool.fetch_page_mut(page_id)?;
-            let slot_id = guard.page_mut().insert_tuple(&tuple_data)?;
+            let (final_page_id, slot_id) = match guard.page_mut().insert_tuple(&tuple_data) {
+                Ok(slot_id) => {
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(page_id, guard.free_space() as u16);
+                    }
+                    drop(guard);
+                    (page_id, slot_id)
+                }
+                Err(_) => {
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(page_id, guard.free_space() as u16);
+                    }
+                    drop(guard);
 
-            // Update free space map
-            if let Some(fsm) = self.table_fsm.get(&table_id) {
-                fsm.update(page_id, guard.free_space() as u16);
-            }
-
-            drop(guard);
+                    let (new_page_id, _) = self.buffer_pool.new_page()?;
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(new_page_id, crate::PAGE_SIZE as u16);
+                    }
+                    available_pages.push(new_page_id);
+                    let mut new_guard = self.buffer_pool.fetch_page_mut(new_page_id)?;
+                    let slot_id = new_guard.page_mut().insert_tuple(&tuple_data)?;
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(new_page_id, new_guard.free_space() as u16);
+                    }
+                    drop(new_guard);
+                    (new_page_id, slot_id)
+                }
+            };
 
             // Register row location for O(1) lookups
-            self.row_locator.insert(table_id, row_id, page_id, slot_id);
+            self.row_locator.insert(table_id, row_id, final_page_id, slot_id);
 
             // Create WAL entry (don't append yet)
             let insert_record = InsertRecord {
                 row_id,
-                page_id,
+                page_id: final_page_id,
                 slot_id,
                 tuple_data: tuple_data.clone(),
             };
@@ -597,7 +650,7 @@ impl RowStoreImpl {
         };
 
         // Scan pages once, collecting all matching rows
-        let mut current_page_id = first_page_id;
+        let current_page_id = first_page_id;
         loop {
             let guard = self.buffer_pool.fetch_page(current_page_id)?;
 

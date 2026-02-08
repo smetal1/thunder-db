@@ -8,7 +8,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, warn};
 
 use crate::{ColumnStatistics, FdwCapabilities, Qual, QualOperator};
 use thunder_common::prelude::*;

@@ -149,6 +149,7 @@ pub struct Segment {
     /// Column data (column_name -> compressed bytes)
     columns: HashMap<String, Bytes>,
     /// Decompressed column cache
+    #[allow(dead_code)]
     column_cache: DashMap<String, ArrayRef>,
 }
 

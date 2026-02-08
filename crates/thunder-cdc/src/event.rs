@@ -990,7 +990,7 @@ mod tests {
 // ============================================================================
 
 mod base64 {
-    use std::fmt::Write;
+    
 
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -1003,7 +1003,7 @@ mod base64 {
             let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
             let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
 
-            result.push(ALPHABET[(b0 >> 2)] as char);
+            result.push(ALPHABET[b0 >> 2] as char);
             result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
 
             if i + 1 < data.len() {

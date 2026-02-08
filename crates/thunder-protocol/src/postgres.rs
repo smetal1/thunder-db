@@ -389,6 +389,7 @@ struct PreparedStatementInfo {
 struct PortalInfo {
     statement_name: String,
     params: Vec<Option<Vec<u8>>>,
+    cached_result: Option<QueryResult>,
 }
 
 /// State for COPY command processing
@@ -1068,6 +1069,7 @@ impl<E: QueryExecutor> PostgresConnection<E> {
         self.portals.insert(portal_name, PortalInfo {
             statement_name: stmt_name,
             params,
+            cached_result: None,
         });
 
         self.send_bind_complete().await
@@ -1098,11 +1100,34 @@ impl<E: QueryExecutor> PostgresConnection<E> {
                 }
             }
             b'P' => {
-                // Describe portal
+                // Describe portal — execute the query to discover result columns
                 if let Some(portal) = self.portals.get(&name).cloned() {
                     if let Some(stmt) = self.prepared_statements.get(&portal.statement_name).cloned() {
                         if !stmt.columns.is_empty() {
                             self.send_row_description(&stmt.columns).await?;
+                        } else if let Some(session_id) = self.session_id {
+                            // Execute query to discover columns and cache the result
+                            let query = self.substitute_params(&stmt.query, &portal.params)?;
+                            match self.executor.execute(session_id, &query).await {
+                                Ok(result) => {
+                                    if !result.columns.is_empty() {
+                                        self.send_row_description(&result.columns).await?;
+                                        // Cache columns on prepared statement
+                                        if let Some(ps) = self.prepared_statements.get_mut(&portal.statement_name) {
+                                            ps.columns = result.columns.clone();
+                                        }
+                                    } else {
+                                        self.send_no_data().await?;
+                                    }
+                                    // Cache result for Execute to reuse
+                                    if let Some(p) = self.portals.get_mut(&name) {
+                                        p.cached_result = Some(result);
+                                    }
+                                }
+                                Err(_) => {
+                                    self.send_no_data().await?;
+                                }
+                            }
                         } else {
                             self.send_no_data().await?;
                         }
@@ -1151,31 +1176,42 @@ impl<E: QueryExecutor> PostgresConnection<E> {
             }
         };
 
-        // Substitute parameters in query
-        let query = self.substitute_params(&stmt.query, &portal.params)?;
+        // Use cached result from Describe if available, otherwise execute
+        let result = if let Some(cached) = portal.cached_result {
+            Ok(cached)
+        } else {
+            let query = self.substitute_params(&stmt.query, &portal.params)?;
 
-        // Create and register cancellation token
-        let cancel_token = CancellationToken::new();
-        self.cancel_registry.insert(self.backend_key, cancel_token.clone());
-        self.current_cancel_token = Some(cancel_token.clone());
+            // Create and register cancellation token
+            let cancel_token = CancellationToken::new();
+            self.cancel_registry.insert(self.backend_key, cancel_token.clone());
+            self.current_cancel_token = Some(cancel_token.clone());
 
-        // Execute with cancellation support
-        let result = tokio::select! {
-            res = self.executor.execute(session_id, &query) => res,
-            _ = cancel_token.cancelled() => {
-                Err(Error::Internal("Query cancelled by user request".into()))
-            }
+            let res = tokio::select! {
+                res = self.executor.execute(session_id, &query) => res,
+                _ = cancel_token.cancelled() => {
+                    Err(Error::Internal("Query cancelled by user request".into()))
+                }
+            };
+
+            // Unregister the cancel token
+            self.cancel_registry.remove(&self.backend_key);
+            self.current_cancel_token = None;
+            res
         };
 
-        // Unregister the cancel token
-        self.cancel_registry.remove(&self.backend_key);
-        self.current_cancel_token = None;
+        // Clear cached result
+        if let Some(p) = self.portals.get_mut(&portal_name) {
+            p.cached_result = None;
+        }
 
         match result {
             Ok(result) => {
+                let query = self.substitute_params(&stmt.query, &portal.params)
+                    .unwrap_or_default();
                 self.update_transaction_state(&query);
 
-                // Send data rows
+                // Send data rows (RowDescription already sent by Describe)
                 for row in &result.rows {
                     self.send_data_row(row).await?;
                 }

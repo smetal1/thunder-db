@@ -495,7 +495,7 @@ impl Page {
     pub fn insert_tuple(&mut self, data: &[u8]) -> Result<u16> {
         if !self.can_fit(data.len()) {
             return Err(Error::Storage(
-                thunder_common::error::StorageError::BufferPoolFull,
+                thunder_common::error::StorageError::PageFull,
             ));
         }
 
@@ -593,7 +593,7 @@ impl Page {
             self.compact();
             if !self.can_fit(data.len()) {
                 return Err(Error::Storage(
-                    thunder_common::error::StorageError::BufferPoolFull,
+                    thunder_common::error::StorageError::PageFull,
                 ));
             }
         }

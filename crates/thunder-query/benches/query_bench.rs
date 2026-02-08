@@ -3,7 +3,6 @@
 //! Benchmarks query execution for different plan types using in-memory data.
 //! Tests sequential scan, filter, projection, sorting, and aggregation.
 
-use std::collections::HashMap;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use thunder_common::types::*;

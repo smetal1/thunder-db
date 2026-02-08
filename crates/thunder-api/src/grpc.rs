@@ -24,7 +24,7 @@ use crate::AppState;
 
 /// Query service for executing SQL
 pub mod thunder {
-    use super::*;
+    
     use serde::{Deserialize, Serialize};
 
     // Request/Response types (in real implementation, these come from prost)
@@ -418,7 +418,7 @@ impl ThunderQueryService {
         })?;
 
         let table = req.table.clone();
-        let operations = req.operations.clone();
+        let _operations = req.operations.clone();
 
         // Verify the table exists
         if engine.get_table(&table).is_none() {
@@ -427,7 +427,7 @@ impl ThunderQueryService {
 
         // Spawn subscription handler that polls for changes
         tokio::spawn(async move {
-            let mut last_lsn: u64 = 0;
+            let _last_lsn: u64 = 0;
             let poll_interval = tokio::time::Duration::from_millis(100);
 
             loop {
@@ -549,7 +549,7 @@ impl GrpcServer {
     /// Start the gRPC server
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let service = ThunderQueryService::new(self.state);
+        let _service = ThunderQueryService::new(self.state);
 
         info!(address = %addr, "Starting gRPC server");
 
@@ -595,6 +595,7 @@ fn value_to_cell(value: &thunder_common::types::Value) -> CellValue {
 }
 
 /// Convert gRPC ParameterValue to internal Value
+#[allow(dead_code)]
 fn param_to_value(param: &ParameterValue) -> thunder_common::types::Value {
     use thunder_common::types::Value;
 

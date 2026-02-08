@@ -467,6 +467,7 @@ pub fn convert_join_type(join_type: &sql_ast::JoinOperator) -> Result<JoinType> 
         JoinOperator::CrossJoin | JoinOperator::CrossApply | JoinOperator::OuterApply => {
             Ok(JoinType::Cross)
         }
+        #[allow(unreachable_patterns)]
         other => Err(Error::Sql(SqlError::UnsupportedFeature(format!(
             "Unsupported join type: {:?}",
             other

@@ -8,10 +8,10 @@ use thunder_common::error::SqlError;
 use thunder_common::prelude::*;
 use thunder_sql::{
     catalog::{CatalogProvider, IndexInfo, IndexType},
-    AggregateExpr, AggregateFunction, Expr, JoinType, LogicalPlan, SortExpr,
+    AggregateExpr, Expr, JoinType, LogicalPlan,
 };
 
-use crate::{Partitioning, PhysicalPlan, ScanRange};
+use crate::{PhysicalPlan, ScanRange};
 
 /// Physical planner that converts logical plans to physical plans
 pub struct DefaultPhysicalPlanner {
@@ -166,7 +166,7 @@ impl DefaultPhysicalPlanner {
         table_name: &str,
         schema: Schema,
         filter: Option<Box<Expr>>,
-        projection: Option<Vec<usize>>,
+        _projection: Option<Vec<usize>>,
     ) -> Result<PhysicalPlan> {
         let table_info = self
             .catalog
@@ -427,8 +427,8 @@ impl DefaultPhysicalPlanner {
                         }
                         // Also handle name-based column references
                         else if let (
-                            Expr::Column { name: l_name, .. },
-                            Expr::Column { name: r_name, .. },
+                            Expr::Column { name: _l_name, .. },
+                            Expr::Column { name: _r_name, .. },
                         ) = (left.as_ref(), right.as_ref())
                         {
                             // Use simple heuristic: assume first reference is left table
@@ -514,7 +514,7 @@ impl DefaultPhysicalPlanner {
     /// Estimate the output size of a plan
     fn estimate_plan_size(&self, plan: &PhysicalPlan) -> usize {
         match plan {
-            PhysicalPlan::SeqScan { table_id, .. } => {
+            PhysicalPlan::SeqScan {  .. } => {
                 // Default estimate - real implementation would use catalog stats
                 10000
             }
@@ -564,7 +564,7 @@ impl DefaultPhysicalPlanner {
     fn plan_insert(
         &self,
         table_name: &str,
-        columns: Vec<String>,
+        _columns: Vec<String>,
         values: Vec<Vec<Expr>>,
     ) -> Result<PhysicalPlan> {
         let table_info = self
@@ -666,7 +666,7 @@ impl crate::PhysicalPlanner for DefaultPhysicalPlanner {
 
 /// Physical plan visitor for analysis and optimization
 pub trait PhysicalPlanVisitor {
-    fn visit(&mut self, plan: &PhysicalPlan) -> bool {
+    fn visit(&mut self, _plan: &PhysicalPlan) -> bool {
         true
     }
 }

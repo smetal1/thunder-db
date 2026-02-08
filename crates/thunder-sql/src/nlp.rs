@@ -98,6 +98,7 @@ struct QueryPattern {
     /// Regex pattern to match
     pattern: Regex,
     /// SQL template with placeholders
+    #[allow(dead_code)]
     template: String,
     /// Intent of this pattern
     intent: QueryIntent,

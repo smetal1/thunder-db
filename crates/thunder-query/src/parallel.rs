@@ -6,15 +6,13 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use crossbeam::channel::{bounded, Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::mpsc;
 use thunder_common::prelude::*;
-use thunder_sql::{AggregateExpr, AggregateFunction, Expr, JoinType};
+use thunder_sql::{AggregateExpr, Expr, JoinType};
 
 use crate::executor::Aggregator;
-use crate::vectorized::{VectorBatch, VectorizedFilter, VectorizedHashJoin, VectorizedSort};
-use crate::{ExecutionStats, Partitioning, PhysicalPlan, RecordBatch};
+use crate::vectorized::{VectorBatch, VectorizedFilter, VectorizedSort};
+use crate::{ExecutionStats, Partitioning, PhysicalPlan};
 
 /// Default number of parallel workers
 pub const DEFAULT_NUM_WORKERS: usize = 4;
@@ -334,6 +332,7 @@ pub struct ParallelHashJoin {
     /// Right join keys
     right_keys: Vec<usize>,
     /// Join type
+    #[allow(dead_code)]
     join_type: JoinType,
     /// Hash tables per partition (built from right side) - using String key for hashing
     hash_tables: Vec<Arc<RwLock<HashMap<String, Vec<Row>>>>>,
@@ -818,7 +817,7 @@ impl ParallelExecutor {
             return Ok(vec![]);
         }
 
-        let schema = data[0].schema.clone();
+        let _schema = data[0].schema.clone();
         let num_partitions = self.context.num_workers.min(data.len()).max(1);
 
         let mut sort = ParallelSort::new(order_by);

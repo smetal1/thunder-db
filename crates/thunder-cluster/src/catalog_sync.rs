@@ -5,7 +5,6 @@
 //! the cluster and server crates.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;

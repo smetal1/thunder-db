@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::Next,

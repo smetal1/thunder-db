@@ -479,7 +479,7 @@ impl BTree {
 
         // Clear existing tuple and insert new one
         if guard.slot_count() > 0 {
-            guard.page_mut().delete_tuple(0);
+            let _ = guard.page_mut().delete_tuple(0);
         }
         guard.page_mut().insert_tuple(&data)?;
 
@@ -560,7 +560,7 @@ impl BTree {
             if node.is_full(self.config.max_keys) {
                 // Split leaf
                 let (new_page_id, _) = self.buffer_pool.new_page()?;
-                let (mut right, separator) = node.split(new_page_id);
+                let (right, separator) = node.split(new_page_id);
 
                 self.save_node(&node)?;
                 self.save_node(&right)?;
@@ -589,7 +589,7 @@ impl BTree {
                 if node.is_full(self.config.max_keys) {
                     // Split internal node
                     let (new_internal_page_id, _) = self.buffer_pool.new_page()?;
-                    let (mut right, separator) = node.split(new_internal_page_id);
+                    let (right, separator) = node.split(new_internal_page_id);
 
                     self.save_node(&node)?;
                     self.save_node(&right)?;
@@ -764,6 +764,7 @@ impl BTree {
 }
 
 /// Iterator over B+Tree entries.
+#[allow(dead_code)]
 pub struct BTreeIterator {
     buffer_pool: Arc<BufferPoolImpl>,
     current_page_id: PageId,

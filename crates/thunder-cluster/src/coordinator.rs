@@ -7,18 +7,17 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use thunder_common::prelude::*;
 
 use crate::gossip::{GossipConfig, GossipEvent, Gossiper};
 use crate::membership::{HealthStatus, Membership, MembershipConfig, MembershipEvent, NodeMeta};
-use crate::raft_node::{MemoryStorage, RaftNode, RaftNodeConfig};
-use crate::region::{Peer, Region, RegionAction, RegionConfig, RegionManager, RegionMeta, RegionState};
+use crate::region::{Peer, RegionAction, RegionConfig, RegionManager};
 use crate::transport::{NetworkTransport, TransportConfig};
 use crate::{ClusterManager, Command, NodeInfo, NodeStatus, RaftMessage, RegionInfo};
 
@@ -89,6 +88,7 @@ pub enum ClusterState {
 }
 
 /// Pending operation for tracking async operations
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PendingOperation {
     /// Operation type
@@ -101,6 +101,7 @@ struct PendingOperation {
     result_tx: Option<tokio::sync::oneshot::Sender<Result<()>>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationType {
     RegionSplit,
@@ -126,6 +127,7 @@ pub struct ClusterCoordinator {
     /// Gossiper for peer discovery
     gossiper: Option<Arc<Gossiper>>,
     /// Pending operations
+    #[allow(dead_code)]
     pending_ops: DashMap<u64, PendingOperation>,
     /// Next operation ID
     next_op_id: AtomicU64,
@@ -684,7 +686,7 @@ impl ClusterCoordinator {
             Error::Internal(format!("Region {:?} not found", region_id))
         })?;
 
-        let (start_key, end_key) = region.key_range();
+        let (_start_key, end_key) = region.key_range();
 
         // Find adjacent region to merge with
         let adjacent_region_id = if !end_key.is_empty() {
@@ -868,9 +870,9 @@ impl ClusterCoordinator {
     /// Handle an incoming message
     async fn handle_message(&self, msg: RaftMessage) -> Result<()> {
         // Find the region
-        if let Some(region) = self.region_manager.get_region(msg.region_id) {
+        if let Some(_region) = self.region_manager.get_region(msg.region_id) {
             // Convert message and step the Raft node
-            let raft_msg = crate::raft_node::to_raft_message(&msg);
+            let _raft_msg = crate::raft_node::to_raft_message(&msg);
             // region.step(raft_msg)?;
             tracing::debug!("Received message for region {:?}: {:?}", msg.region_id, msg.msg_type);
         } else {
@@ -1134,12 +1136,12 @@ impl Scheduler {
         let target_per_node = regions.len() * self.target_replicas / available_nodes.len();
 
         // Find overloaded and underloaded nodes
-        let mut overloaded: Vec<_> = available_nodes
+        let overloaded: Vec<_> = available_nodes
             .iter()
             .filter(|n| region_counts.get(&n.id).copied().unwrap_or(0) > target_per_node + 1)
             .collect();
 
-        let mut underloaded: Vec<_> = available_nodes
+        let underloaded: Vec<_> = available_nodes
             .iter()
             .filter(|n| region_counts.get(&n.id).copied().unwrap_or(0) < target_per_node)
             .collect();

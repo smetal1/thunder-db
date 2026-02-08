@@ -172,7 +172,7 @@ impl Connection {
 
         // Split for reader/writer
         let (read_half, write_half) = stream.into_split();
-        let reader = BufReader::new(read_half.reunite(write_half).unwrap());
+        let _reader = BufReader::new(read_half.reunite(write_half).unwrap());
 
         // Reconnect for split
         let stream2 = timeout(connect_timeout, TcpStream::connect(addr))
@@ -181,13 +181,13 @@ impl Connection {
             .map_err(|e| Error::Io(e))?;
 
         let (read_half, write_half) = stream2.into_split();
-        let reader = BufReader::new(read_half.reunite(write_half).unwrap());
+        let _reader = BufReader::new(read_half.reunite(write_half).unwrap());
 
         let stream3 = timeout(connect_timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| Error::Timeout("Connection timeout".to_string()))?
             .map_err(|e| Error::Io(e))?;
-        let (_, write_half2) = stream3.into_split();
+        let (_, _write_half2) = stream3.into_split();
 
         // Actually, let's use a simpler approach - just use one stream
         let stream = timeout(connect_timeout, TcpStream::connect(addr))

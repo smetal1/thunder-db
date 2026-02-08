@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use thunder_common::prelude::*;
-use thunder_storage::wal::{WalReader, WalRecordHeader};
+use thunder_storage::wal::WalReader;
 use thunder_storage::WalWriter;
 
 use crate::{NetworkTransport, RaftMessage, RaftMessageType};

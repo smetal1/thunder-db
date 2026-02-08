@@ -9,7 +9,7 @@ use std::sync::Arc;
 use clap::Parser;
 use thunder_api::AppState;
 use thunder_cluster::{
-    ClusterCoordinator, CoordinatorConfig, DistributedCatalog, GossipConfig, GrpcTransport,
+    ClusterCoordinator, CoordinatorConfig, GossipConfig, GrpcTransport,
     TransportConfig,
 };
 use thunder_common::config::ServerConfig;

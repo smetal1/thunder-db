@@ -7,14 +7,12 @@
 //! - Provides exactly-once semantics with position tracking
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock;
 use tokio_postgres::{Client, Config, NoTls, SimpleQueryMessage};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::{CdcConfig, CdcConnector, CdcEvent, CdcOperation, CdcPosition};
 use thunder_common::prelude::*;
@@ -24,6 +22,7 @@ use thunder_common::prelude::*;
 // ============================================================================
 
 /// PostgreSQL CDC connector using logical replication
+#[allow(dead_code)]
 pub struct PostgresConnector {
     /// Configuration
     config: CdcConfig,
@@ -55,6 +54,7 @@ pub struct PostgresConnector {
 
 /// Transaction state during replication
 #[derive(Debug)]
+#[allow(dead_code)]
 struct TransactionState {
     xid: u64,
     commit_lsn: u64,
@@ -64,6 +64,7 @@ struct TransactionState {
 
 /// Column definition from catalog
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ColumnDef {
     name: String,
     type_oid: u32,
@@ -373,7 +374,7 @@ impl PostgresConnector {
             };
 
             // Parse column values
-            let column_names = change.get("columnnames")?.as_array()?;
+            let _column_names = change.get("columnnames")?.as_array()?;
             let column_values = change.get("columnvalues")?.as_array()?;
 
             let after = if matches!(operation, CdcOperation::Insert | CdcOperation::Update) {
@@ -474,7 +475,7 @@ impl PostgresConnector {
         // This is a simplified text fallback
 
         // For now, treat as opaque and try JSON parse
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+        if let Ok(_json) = serde_json::from_str::<serde_json::Value>(data) {
             return self.parse_wal2json(lsn, xid, data);
         }
 

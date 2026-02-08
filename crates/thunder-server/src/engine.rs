@@ -1742,7 +1742,7 @@ impl DatabaseEngine {
         &self,
         table_name: &str,
         filter: &Option<Expr>,
-        txn_id: TxnId,
+        _txn_id: TxnId,
     ) -> Result<()> {
         let table_desc = self.storage_catalog.get_table_by_name("public", table_name);
         let table_desc = match table_desc {
@@ -1765,7 +1765,7 @@ impl DatabaseEngine {
         if table_info.is_none() {
             return Ok(());
         }
-        let table_info = table_info.unwrap();
+        let _table_info = table_info.unwrap();
 
         // For each referencing table, check if any of its rows reference values
         // in the to-be-deleted rows

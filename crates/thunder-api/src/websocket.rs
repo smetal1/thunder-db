@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     extract::{
@@ -162,6 +161,7 @@ pub struct NotificationPayload {
 // ============================================================================
 
 /// State for a single WebSocket connection
+#[allow(dead_code)]
 struct ConnectionState {
     id: String,
     subscriptions: HashMap<String, Subscription>,
@@ -169,6 +169,7 @@ struct ConnectionState {
     sender: mpsc::Sender<ServerMessage>,
 }
 
+#[allow(dead_code)]
 struct Subscription {
     id: String,
     table: String,
@@ -176,6 +177,7 @@ struct Subscription {
     filter: Option<String>,
 }
 
+#[allow(dead_code)]
 struct LiveQuery {
     id: String,
     sql: String,
@@ -281,7 +283,7 @@ async fn handle_socket(socket: WebSocket, state: WebSocketState) {
     let mut change_rx = state.manager.change_broadcast.subscribe();
 
     // Task to forward messages from channel to WebSocket
-    let connection_id_clone = connection_id.clone();
+    let _connection_id_clone = connection_id.clone();
     let forward_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let json = match serde_json::to_string(&msg) {
@@ -371,7 +373,7 @@ async fn handle_socket(socket: WebSocket, state: WebSocketState) {
                     }))
                     .await;
             }
-            Message::Ping(data) => {
+            Message::Ping(_data) => {
                 // Axum handles pong automatically
             }
             Message::Pong(_) => {}

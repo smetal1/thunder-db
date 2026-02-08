@@ -179,6 +179,7 @@ pub struct Membership {
     /// Event sender
     event_tx: broadcast::Sender<MembershipEvent>,
     /// Next incarnation number
+    #[allow(dead_code)]
     next_incarnation: AtomicU64,
     /// Current leader (if known)
     leader_id: RwLock<Option<NodeId>>,

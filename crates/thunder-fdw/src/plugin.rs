@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use libloading::{Library, Symbol};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer, ForeignTableDef,
@@ -347,6 +347,7 @@ pub struct PluginInfo {
 
 /// Wrapper for plugin-provided FDW
 struct PluginFdw {
+    #[allow(dead_code)]
     fdw_ptr: *mut c_void,
     connector_type: String,
 }

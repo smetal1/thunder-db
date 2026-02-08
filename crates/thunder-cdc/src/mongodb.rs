@@ -6,7 +6,6 @@
 //! - Handles all CRUD operations and collection drops
 //! - Provides full document lookup option
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +16,7 @@ use mongodb::{
     options::{ChangeStreamOptions, ClientOptions, FullDocumentType},
     Client,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{CdcConfig, CdcConnector, CdcEvent, CdcOperation, CdcPosition};
 use thunder_common::prelude::*;

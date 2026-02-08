@@ -97,6 +97,7 @@ struct ConnectionPoolInner {
     total_count: AtomicUsize,
     next_id: AtomicU64,
     closed: parking_lot::RwLock<bool>,
+    #[allow(dead_code)]
     created_at: Instant,
     stats: parking_lot::RwLock<PoolStats>,
 }

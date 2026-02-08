@@ -145,6 +145,7 @@ pub struct InMemoryTransport {
     /// Sender for this node
     sender: mpsc::Sender<RaftMessage>,
     /// Configuration
+    #[allow(dead_code)]
     config: TransportConfig,
 }
 
@@ -322,6 +323,7 @@ impl GrpcTransport {
     }
 
     /// Update peer state after failed communication
+    #[allow(dead_code)]
     fn mark_peer_failure(&self, node_id: NodeId) {
         if let Some(mut peer) = self.peers.get_mut(&node_id) {
             peer.mark_failed();
@@ -337,7 +339,7 @@ impl NetworkTransport for GrpcTransport {
         })?;
 
         // Retry with exponential backoff
-        let mut last_err = None;
+        let last_err = None;
         for attempt in 0..self.config.max_retries {
             tracing::debug!(
                 attempt = attempt,
@@ -491,6 +493,7 @@ pub struct MessageRouter {
     /// Batch size threshold
     batch_size: usize,
     /// Batch timeout
+    #[allow(dead_code)]
     batch_timeout: Duration,
 }
 
@@ -554,6 +557,7 @@ pub struct ClusterTransport {
     /// This node's ID
     node_id: NodeId,
     /// This node's listen address
+    #[allow(dead_code)]
     listen_addr: SocketAddr,
     /// Cluster name for validation
     cluster_name: String,
@@ -859,6 +863,7 @@ impl ClusterTransport {
     }
 
     /// Update peer state after failed communication
+    #[allow(dead_code)]
     fn mark_peer_failure(&self, node_id: NodeId) {
         if let Some(mut peer) = self.peers.get_mut(&node_id) {
             peer.mark_failed();
@@ -1032,6 +1037,7 @@ impl NetworkTransport for ClusterTransport {
 }
 
 /// gRPC server implementation for cluster service
+#[allow(dead_code)]
 pub struct ClusterServer {
     /// Node ID
     node_id: NodeId,

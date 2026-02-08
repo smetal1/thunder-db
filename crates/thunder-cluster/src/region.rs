@@ -7,14 +7,14 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thunder_common::prelude::*;
 
 use crate::raft_node::{MemoryStorage, RaftNode, RaftNodeConfig, RaftStatus};
-use crate::{Command, NodeInfo, NodeStatus, RegionInfo};
+use crate::{Command, RegionInfo};
 
 /// Region configuration
 #[derive(Debug, Clone)]
@@ -243,6 +243,7 @@ pub struct Region {
     /// Configuration
     config: RegionConfig,
     /// Applied index
+    #[allow(dead_code)]
     applied_index: AtomicU64,
     /// Pending split key (if splitting)
     pending_split: RwLock<Option<Vec<u8>>>,

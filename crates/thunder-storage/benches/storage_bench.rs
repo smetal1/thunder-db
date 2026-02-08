@@ -4,7 +4,7 @@
 //! operations across different workloads and data sizes.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use thunder_storage::page::{Page, PageType, PAGE_SIZE};
+use thunder_storage::page::{Page, PageType};
 use thunder_storage::btree::BTreeNode;
 use thunder_common::types::PageId;
 use bytes::Bytes;

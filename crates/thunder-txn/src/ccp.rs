@@ -8,15 +8,13 @@
 //! Also supports Serializable Snapshot Isolation (SSI).
 
 use crate::{
-    AbortReason, CommitResult, Transaction, TransactionManager, TransactionStatus, WriteType,
+    AbortReason, CommitResult, TransactionManager, TransactionStatus, WriteType,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use thunder_common::error::TransactionError;
 use thunder_common::prelude::*;
 
 /// OCC configuration.
@@ -51,6 +49,7 @@ struct OccTransaction {
     /// Start timestamp
     start_ts: u64,
     /// Status
+    #[allow(dead_code)]
     status: TransactionStatus,
     /// Read set: (table_id, row_id) -> version read
     read_set: HashMap<(TableId, RowId), u64>,
@@ -101,6 +100,7 @@ struct CommittedTxnInfo {
     /// Commit timestamp
     commit_ts: u64,
     /// Write set of committed transaction
+    #[allow(dead_code)]
     write_set: HashSet<(TableId, RowId)>,
 }
 
@@ -257,7 +257,7 @@ impl OccTransactionManager {
     }
 
     /// Validate a transaction.
-    fn validate(&self, txn: &OccTransaction, validation_ts: u64) -> Result<bool> {
+    fn validate(&self, txn: &OccTransaction, _validation_ts: u64) -> Result<bool> {
         // Backward validation: check if any item in read set was modified
         // by a transaction that committed after we started
         if self.config.backward_validation {

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thunder_common::error::SqlError;
 use thunder_common::prelude::*;
-use thunder_sql::{AggregateExpr, AggregateFunction, BinaryOperator, Expr, SortExpr, UnaryOperator};
+use thunder_sql::{AggregateExpr, BinaryOperator, Expr, SortExpr, UnaryOperator};
 
 use crate::{ExecutionStats, PhysicalPlan, RecordBatch};
 use crate::executor::{Aggregator, ExprEvaluator};
@@ -708,6 +708,7 @@ pub struct VectorizedExecutor {
     /// Batch size
     batch_size: usize,
     /// Execution stats
+    #[allow(dead_code)]
     stats: ExecutionStats,
 }
 

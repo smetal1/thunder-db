@@ -174,6 +174,7 @@ pub struct ProductQuantizer {
     /// Centroids for each subspace [subspace][centroid][dim]
     centroids: Vec<Vec<Vec<f32>>>,
     /// Distance lookup tables (precomputed for search)
+    #[allow(dead_code)]
     distance_tables: RwLock<Option<Vec<Vec<f32>>>>,
     /// Whether trained
     trained: bool,

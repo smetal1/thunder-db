@@ -8,7 +8,6 @@
 //! - LIMIT: take top-N across partials
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thunder_common::prelude::*;

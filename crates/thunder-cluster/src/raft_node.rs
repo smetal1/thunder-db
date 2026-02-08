@@ -10,7 +10,6 @@ use raft::prelude::*;
 use raft::{Config as RaftConfig, RawNode, StateRole, Storage};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thunder_common::prelude::*;
 
@@ -289,6 +288,7 @@ impl Storage for MemoryStorage {
 }
 
 /// Proposal waiting for response
+#[allow(dead_code)]
 struct PendingProposal {
     /// Proposal ID
     id: u64,
@@ -505,7 +505,7 @@ impl<S: Storage> RaftNode<S> {
             self.leader_id.store(ss.leader_id, Ordering::SeqCst);
         }
 
-        let mut light_ready = raw_node.advance(ready);
+        let light_ready = raw_node.advance(ready);
 
         // Commit entries
         if let Some(commit) = light_ready.commit_index() {

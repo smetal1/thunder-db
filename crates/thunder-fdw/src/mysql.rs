@@ -17,13 +17,13 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, 
 use async_trait::async_trait;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Row as SqlxRow, TypeInfo};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     ColumnStatistics, FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer,
     ForeignTableDef, ModifyOperation, Qual, QualOperator,
 };
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use crate::FieldDef;
 use thunder_common::prelude::*;
 
@@ -132,6 +132,7 @@ impl MySqlFdw {
     }
 
     /// Refresh statistics for a table
+    #[allow(dead_code)]
     async fn refresh_statistics(&mut self, table: &str) -> Result<()> {
         let pool = self.pool()?;
 
@@ -142,7 +143,7 @@ impl MySqlFdw {
             .await
             .map_err(|e| Error::Internal(format!("Count failed: {}", e)))?;
 
-        let total_rows = row.0 as u64;
+        let _total_rows = row.0 as u64;
 
         // Get column cardinality from information_schema
         let stats_query = format!(
@@ -454,6 +455,7 @@ pub struct MySqlScan {
     /// Batch size
     batch_size: usize,
     /// Columns being scanned
+    #[allow(dead_code)]
     columns: Vec<String>,
     /// Original SQL for reset
     sql: String,

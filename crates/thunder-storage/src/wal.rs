@@ -518,6 +518,7 @@ struct WalSegment {
     segment_id: u64,
     start_lsn: Lsn,
     current_offset: u64,
+    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -621,6 +622,7 @@ impl WalBuffer {
         self.data.is_empty()
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -1221,7 +1223,7 @@ impl WalReader {
         // We need to read segments to find the right one
         let mut found_segment: Option<WalSegment> = None;
 
-        for (segment_id, path) in segments {
+        for (_segment_id, path) in segments {
             // Open the segment and read its first record to get start_lsn
             let mut segment = WalSegment::open(&path)?;
 

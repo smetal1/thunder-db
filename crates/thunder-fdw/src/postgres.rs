@@ -15,8 +15,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit};
 use async_trait::async_trait;
-use tokio_postgres::{Client, NoTls, Row as PgRow, Statement};
-use tracing::{debug, error, info, warn};
+use tokio_postgres::{Client, NoTls, Row as PgRow};
+use tracing::{debug, error, info};
 
 use crate::{
     ColumnStatistics, FdwCapabilities, ForeignDataWrapper, ForeignScan, ForeignServer,
@@ -159,6 +159,7 @@ impl PostgresFdw {
     }
 
     /// Refresh statistics for a table
+    #[allow(dead_code)]
     async fn refresh_statistics(&mut self, table: &str) -> Result<()> {
         let client = self.client()?;
 
@@ -510,6 +511,7 @@ pub struct PostgresScan {
     /// Batch size
     batch_size: usize,
     /// Columns being scanned
+    #[allow(dead_code)]
     columns: Vec<String>,
     /// Original SQL for reset
     sql: String,

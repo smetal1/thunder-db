@@ -16,9 +16,9 @@ use thunder_common::prelude::Value;
 use thunder_cdc::{CdcConfig, ConnectorType, CdcPosition};
 
 use crate::{
-    ApiError, AppState, ColumnInfo, EngineStats, HealthResponse, MetricsResponse, QueryRequest,
-    QueryResponse, TransactionRequest, TransactionResponse, CatalogTableInfo,
-    sql_validator::{SqlValidator, SqlValidatorConfig, validate_parameters},
+    ApiError, AppState, ColumnInfo, HealthResponse, MetricsResponse, QueryRequest,
+    QueryResponse, TransactionRequest, TransactionResponse,
+    sql_validator::{SqlValidator, validate_parameters},
 };
 
 /// Result type for API handlers

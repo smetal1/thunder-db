@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use rand::prelude::*;
 
 use thunder_common::prelude::*;
-use crate::{DistanceFunction, IvfConfig, IndexStats, SearchResult, VectorFilter, VectorIndex};
+use crate::{IvfConfig, IndexStats, SearchResult, VectorFilter, VectorIndex};
 
 // ============================================================================
 // Data Structures
