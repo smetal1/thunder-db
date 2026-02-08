@@ -814,6 +814,9 @@ pub struct PhysicalExecutor {
     row_store: Option<Arc<RowStoreImpl>>,
     /// Current transaction snapshot for visibility
     snapshot: Option<Snapshot>,
+    /// Whether this execution is in auto-commit mode.
+    /// When false (explicit transaction), WAL writes skip fsync for DML ops.
+    auto_commit: bool,
 }
 
 impl PhysicalExecutor {
@@ -822,6 +825,7 @@ impl PhysicalExecutor {
             storage,
             row_store: None,
             snapshot: None,
+            auto_commit: true,
         }
     }
 
@@ -831,6 +835,7 @@ impl PhysicalExecutor {
             storage,
             row_store: Some(row_store),
             snapshot: None,
+            auto_commit: true,
         }
     }
 
@@ -841,15 +846,17 @@ impl PhysicalExecutor {
 
     /// Execute a physical plan and return results
     pub async fn execute(&self, plan: PhysicalPlan, _txn_id: TxnId) -> Result<ExecutionResult> {
-        self.execute_with_snapshot(plan, _txn_id, None).await
+        self.execute_with_snapshot(plan, _txn_id, None, true).await
     }
 
-    /// Execute a physical plan with a specific snapshot for MVCC visibility
+    /// Execute a physical plan with a specific snapshot for MVCC visibility.
+    /// `auto_commit`: when false, DML WAL writes skip fsync (deferred to COMMIT).
     pub async fn execute_with_snapshot(
         &self,
         plan: PhysicalPlan,
         _txn_id: TxnId,
         snapshot: Option<Snapshot>,
+        auto_commit: bool,
     ) -> Result<ExecutionResult> {
         // Create a temporary executor with the snapshot if provided
         let executor = if let Some(snap) = snapshot {
@@ -857,12 +864,14 @@ impl PhysicalExecutor {
                 storage: self.storage.clone(),
                 row_store: self.row_store.clone(),
                 snapshot: Some(snap),
+                auto_commit,
             }
         } else {
             PhysicalExecutor {
                 storage: self.storage.clone(),
                 row_store: self.row_store.clone(),
                 snapshot: self.snapshot.clone(),
+                auto_commit,
             }
         };
 
@@ -1612,12 +1621,20 @@ impl PhysicalExecutor {
                 .map(|s| s.txn_id)
                 .unwrap_or(TxnId(0));
 
-            // Use batch insert for significantly better performance
-            // (group commit - single WAL sync for all rows)
-            if rows.len() > 1 {
-                block_on(row_store.insert_batch(table_id, txn_id, rows))?;
-            } else if let Some(row) = rows.into_iter().next() {
-                block_on(row_store.insert(table_id, txn_id, row))?;
+            if self.auto_commit {
+                // Auto-commit: use normal insert with WAL fsync
+                if rows.len() > 1 {
+                    block_on(row_store.insert_batch(table_id, txn_id, rows))?;
+                } else if let Some(row) = rows.into_iter().next() {
+                    block_on(row_store.insert(table_id, txn_id, row))?;
+                }
+            } else {
+                // Explicit transaction: skip WAL fsync (deferred to COMMIT)
+                if rows.len() > 1 {
+                    row_store.insert_batch_nosync(table_id, txn_id, rows)?;
+                } else if let Some(row) = rows.into_iter().next() {
+                    row_store.insert_nosync(table_id, txn_id, row)?;
+                }
             }
         } else {
             // Fall back to in-memory storage

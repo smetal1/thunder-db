@@ -6,7 +6,7 @@ replicaCount: 3
 # Image configuration
 image:
   repository: saurav7055/thunderdb
-  tag: "0.8.0"
+  tag: "0.9.0"
   pullPolicy: IfNotPresent
 
 # Image pull secrets (if using private registry)

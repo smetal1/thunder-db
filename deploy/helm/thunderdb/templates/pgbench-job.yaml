@@ -51,9 +51,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        # Create and populate pgbench tables manually.
-        # ThunderDB does not support generate_series(), COPY FROM, or WITH clause,
-        # so we insert data using piped individual INSERT statements via psql.
+        # Create and populate pgbench tables using multi-row INSERT VALUES
+        # for high throughput (batch WAL commit, single parse per 1000 rows).
+        # ThunderDB does not support generate_series(), COPY FROM, or WITH clause.
         - name: pgbench-init
           image: "{{ .Values.benchmark.pgbench.image.repository }}:{{ .Values.benchmark.pgbench.image.tag }}"
           imagePullPolicy: {{ .Values.benchmark.pgbench.image.pullPolicy | default "IfNotPresent" }}
@@ -63,6 +63,18 @@ spec:
             - |
               set -e
               SCALE={{ .Values.benchmark.pgbench.scale }}
+              ROWS_PER_INSERT=1000
+              TXN_SIZE=50000
+
+              echo "=== Waiting for ThunderDB to accept connections ==="
+              for i in $(seq 1 60); do
+                if psql -c "SELECT 1" >/dev/null 2>&1; then
+                  echo "Connected after ${i}s"
+                  break
+                fi
+                [ $i -eq 60 ] && { echo "Timed out waiting for ThunderDB"; exit 1; }
+                sleep 2
+              done
 
               echo "=== Dropping leftover pgbench tables ==="
               for t in pgbench_history pgbench_tellers pgbench_accounts pgbench_branches; do
@@ -75,34 +87,91 @@ spec:
               psql -c "CREATE TABLE IF NOT EXISTS pgbench_accounts (aid INT NOT NULL, bid INT, abalance INT, filler CHAR(84));"
               psql -c "CREATE TABLE IF NOT EXISTS pgbench_history (tid INT, bid INT, aid INT, delta INT, mtime TIMESTAMP, filler CHAR(22));"
 
+              # ----------------------------------------------------------------
+              # Helper: emit multi-row INSERT VALUES statements.
+              # Usage: gen_multirow_inserts TABLE COLS total_rows row_generator
+              # row_generator is a function that takes an id and prints "(v1,v2,...)"
+              # ----------------------------------------------------------------
+
               echo "=== Populating pgbench_branches ($SCALE rows) ==="
-              seq 1 $SCALE | while read bid; do
-                echo "INSERT INTO pgbench_branches(bid,bbalance,filler) VALUES($bid,0,'');"
-              done | psql -q
+              {
+                echo "BEGIN;"
+                ROW_NUM=0
+                for bid in $(seq 1 $SCALE); do
+                  if [ $((ROW_NUM % ROWS_PER_INSERT)) -eq 0 ]; then
+                    [ $ROW_NUM -gt 0 ] && echo ";"
+                    printf "INSERT INTO pgbench_branches(bid,bbalance,filler) VALUES"
+                    printf "(%d,0,'')" "$bid"
+                  else
+                    printf ",(%d,0,'')" "$bid"
+                  fi
+                  ROW_NUM=$((ROW_NUM + 1))
+                done
+                echo ";"
+                echo "COMMIT;"
+              } | psql -q
+              echo "  branches: $SCALE rows done"
 
               TELLERS=$((SCALE * 10))
               echo "=== Populating pgbench_tellers ($TELLERS rows) ==="
-              seq 1 $TELLERS | while read tid; do
-                bid=$(( (tid - 1) / 10 + 1 ))
-                echo "INSERT INTO pgbench_tellers(tid,bid,tbalance,filler) VALUES($tid,$bid,0,'');"
-              done | psql -q
+              {
+                echo "BEGIN;"
+                ROW_NUM=0
+                for tid in $(seq 1 $TELLERS); do
+                  bid=$(( (tid - 1) / 10 + 1 ))
+                  if [ $((ROW_NUM % ROWS_PER_INSERT)) -eq 0 ]; then
+                    [ $ROW_NUM -gt 0 ] && echo ";"
+                    printf "INSERT INTO pgbench_tellers(tid,bid,tbalance,filler) VALUES"
+                    printf "(%d,%d,0,'')" "$tid" "$bid"
+                  else
+                    printf ",(%d,%d,0,'')" "$tid" "$bid"
+                  fi
+                  ROW_NUM=$((ROW_NUM + 1))
+                done
+                echo ";"
+                echo "COMMIT;"
+              } | psql -q
+              echo "  tellers: $TELLERS rows done"
 
               ACCOUNTS=$((SCALE * 100000))
               echo "=== Populating pgbench_accounts ($ACCOUNTS rows) ==="
-              # Pipe INSERTs in batches of 5000 to keep memory low
-              BATCH=5000
-              i=1
-              while [ $i -le $ACCOUNTS ]; do
-                END=$((i + BATCH - 1))
-                [ $END -gt $ACCOUNTS ] && END=$ACCOUNTS
-                seq $i $END | while read aid; do
+              START_TIME=$(date +%s)
+              {
+                echo "BEGIN;"
+                ROW_NUM=0
+                TXN_ROWS=0
+                for aid in $(seq 1 $ACCOUNTS); do
                   bid=$(( (aid - 1) / 100000 + 1 ))
-                  echo "INSERT INTO pgbench_accounts(aid,bid,abalance,filler) VALUES($aid,$bid,0,'');"
-                done | psql -q
-                DONE=$((END * 100 / ACCOUNTS))
-                echo "  ... $END / $ACCOUNTS rows ($DONE%)"
-                i=$((END + 1))
+                  if [ $((ROW_NUM % ROWS_PER_INSERT)) -eq 0 ]; then
+                    [ $ROW_NUM -gt 0 ] && echo ";"
+                    # Periodic COMMIT/BEGIN to keep transaction size bounded
+                    if [ $TXN_ROWS -ge $TXN_SIZE ] && [ $((ROW_NUM % ROWS_PER_INSERT)) -eq 0 ]; then
+                      echo "COMMIT;"
+                      echo "BEGIN;"
+                      TXN_ROWS=0
+                    fi
+                    printf "INSERT INTO pgbench_accounts(aid,bid,abalance,filler) VALUES"
+                    printf "(%d,%d,0,'')" "$aid" "$bid"
+                  else
+                    printf ",(%d,%d,0,'')" "$aid" "$bid"
+                  fi
+                  ROW_NUM=$((ROW_NUM + 1))
+                  TXN_ROWS=$((TXN_ROWS + 1))
+                done
+                echo ";"
+                echo "COMMIT;"
+              } | psql -q &
+              PSQL_PID=$!
+
+              # Progress monitor
+              while kill -0 $PSQL_PID 2>/dev/null; do
+                ELAPSED=$(( $(date +%s) - START_TIME ))
+                echo "  ... loading accounts (${ELAPSED}s elapsed)"
+                sleep 10
               done
+              wait $PSQL_PID
+              ELAPSED=$(( $(date +%s) - START_TIME ))
+              echo "  accounts: $ACCOUNTS rows done in ${ELAPSED}s"
 
               echo "=== Init complete (scale=$SCALE) ==="
           env: &pgbench-env

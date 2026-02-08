@@ -1097,7 +1097,7 @@ impl DatabaseEngine {
             };
 
             // Execute physical plan
-            final_result = ddl_try!(self.execute_physical_plan(txn_id, physical_plan).await);
+            final_result = ddl_try!(self.execute_physical_plan(txn_id, physical_plan, auto_commit).await);
         }
 
         // Auto-commit if needed
@@ -1119,7 +1119,7 @@ impl DatabaseEngine {
     }
 
     /// Execute a physical plan
-    async fn execute_physical_plan(&self, txn_id: TxnId, plan: PhysicalPlan) -> Result<QueryResult> {
+    async fn execute_physical_plan(&self, txn_id: TxnId, plan: PhysicalPlan, auto_commit: bool) -> Result<QueryResult> {
         let query_id = uuid::Uuid::new_v4().to_string();
 
         // Get snapshot from transaction manager for MVCC visibility
@@ -1147,8 +1147,9 @@ impl DatabaseEngine {
             ))
         };
 
-        // Use the physical executor to run the plan with snapshot
-        let result = self.executor.execute_with_snapshot(plan, txn_id, storage_snapshot).await?;
+        // Use the physical executor to run the plan with snapshot.
+        // auto_commit=false skips WAL fsync for DML ops (deferred to COMMIT).
+        let result = self.executor.execute_with_snapshot(plan, txn_id, storage_snapshot, auto_commit).await?;
 
         // Convert execution result to query result
         let columns: Vec<(String, DataType)> = result.schema.columns
@@ -1465,7 +1466,7 @@ impl DatabaseEngine {
         } else {
             // EXPLAIN ANALYZE: execute and show actual stats
             let start = Instant::now();
-            let result = self.execute_physical_plan(txn_id, physical_plan.clone()).await?;
+            let result = self.execute_physical_plan(txn_id, physical_plan.clone(), true).await?;
             let elapsed = start.elapsed();
 
             let plan_text = format_physical_plan(&physical_plan, 0);
@@ -2193,6 +2194,10 @@ impl DatabaseEngine {
             session.last_activity = Instant::now();
             txn_id
         };
+
+        // Flush WAL before commit — ensures all DML written with nosync
+        // during the explicit transaction are durable before we commit.
+        self.wal_writer.flush_buffer()?;
 
         match self.txn_manager.commit(txn_id).await? {
             CommitResult::Committed { commit_ts } => {

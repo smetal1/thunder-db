@@ -579,6 +579,199 @@ impl RowStoreImpl {
         Ok(row_ids)
     }
 
+    /// Insert a single row without WAL fsync (for explicit transactions).
+    /// WAL record is written to buffer but not fsynced — caller must ensure
+    /// durability at transaction commit time.
+    pub fn insert_nosync(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        row: Row,
+    ) -> Result<RowId> {
+        let row_id = self.allocate_row_id(table_id);
+        let tuple_data = self.encode_row(txn_id, &row);
+        let needed_space = (tuple_data.len() + SLOT_ENTRY_SIZE + MIN_FREE_SPACE) as u16;
+
+        let page_id = if let Some(fsm) = self.table_fsm.get(&table_id) {
+            if let Some(page_id) = fsm.find_page(needed_space) {
+                page_id
+            } else {
+                let (page_id, _) = self.buffer_pool.new_page()?;
+                fsm.update(page_id, crate::PAGE_SIZE as u16);
+                page_id
+            }
+        } else {
+            self.get_or_create_first_page(table_id)?
+        };
+
+        let mut guard = self.buffer_pool.fetch_page_mut(page_id)?;
+        let (final_page_id, slot_id) = match guard.page_mut().insert_tuple(&tuple_data) {
+            Ok(slot_id) => {
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(page_id, guard.free_space() as u16);
+                }
+                drop(guard);
+                (page_id, slot_id)
+            }
+            Err(_) => {
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(page_id, guard.free_space() as u16);
+                }
+                drop(guard);
+
+                let (new_page_id, _) = self.buffer_pool.new_page()?;
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(new_page_id, crate::PAGE_SIZE as u16);
+                }
+                let mut new_guard = self.buffer_pool.fetch_page_mut(new_page_id)?;
+                let slot_id = new_guard.page_mut().insert_tuple(&tuple_data)?;
+                if let Some(fsm) = self.table_fsm.get(&table_id) {
+                    fsm.update(new_page_id, new_guard.free_space() as u16);
+                }
+                drop(new_guard);
+                (new_page_id, slot_id)
+            }
+        };
+
+        self.row_locator.insert(table_id, row_id, final_page_id, slot_id);
+
+        let insert_record = InsertRecord {
+            row_id,
+            page_id: final_page_id,
+            slot_id,
+            tuple_data: tuple_data.clone(),
+        };
+
+        let wal_entry = WalEntry {
+            lsn: Lsn(0),
+            txn_id,
+            entry_type: WalEntryType::Insert { row_id },
+            table_id,
+            data: insert_record.encode().to_vec(),
+        };
+        self.wal.append_nosync(wal_entry)?;
+
+        Ok(row_id)
+    }
+
+    /// Insert multiple rows without WAL fsync (for explicit transactions).
+    /// All WAL records are written to buffer but not fsynced.
+    pub fn insert_batch_nosync(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        rows: Vec<Row>,
+    ) -> Result<Vec<RowId>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let batch_size = rows.len();
+        let mut row_ids = Vec::with_capacity(batch_size);
+        let mut wal_entries = Vec::with_capacity(batch_size);
+
+        let avg_row_size = 100;
+        let rows_per_page = (crate::PAGE_SIZE - 100) / avg_row_size;
+        let pages_needed = (batch_size + rows_per_page - 1) / rows_per_page;
+        let page_overhead = (SLOT_ENTRY_SIZE + MIN_FREE_SPACE) as u16;
+
+        let mut available_pages = Vec::with_capacity(pages_needed);
+        for _ in 0..pages_needed {
+            let fsm = self.table_fsm
+                .entry(table_id)
+                .or_insert_with(FreeSpaceMap::new);
+
+            let page_id = if let Some(pid) = fsm.find_page(avg_row_size as u16 + page_overhead) {
+                pid
+            } else {
+                let (page_id, _) = self.buffer_pool.new_page()?;
+                fsm.update(page_id, crate::PAGE_SIZE as u16);
+                page_id
+            };
+            available_pages.push(page_id);
+        }
+
+        let mut page_idx = 0;
+        for row in rows {
+            let row_id = self.allocate_row_id(table_id);
+            let tuple_data = self.encode_row(txn_id, &row);
+            let needed_space = tuple_data.len() as u16 + page_overhead;
+
+            let page_id = loop {
+                if page_idx >= available_pages.len() {
+                    let (new_page_id, _) = self.buffer_pool.new_page()?;
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(new_page_id, crate::PAGE_SIZE as u16);
+                    }
+                    available_pages.push(new_page_id);
+                }
+
+                let pid = available_pages[page_idx];
+                let guard = self.buffer_pool.fetch_page(pid)?;
+                let has_space = guard.free_space() as u16 >= needed_space;
+                drop(guard);
+                if has_space {
+                    break pid;
+                }
+                page_idx += 1;
+            };
+
+            let mut guard = self.buffer_pool.fetch_page_mut(page_id)?;
+            let (final_page_id, slot_id) = match guard.page_mut().insert_tuple(&tuple_data) {
+                Ok(slot_id) => {
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(page_id, guard.free_space() as u16);
+                    }
+                    drop(guard);
+                    (page_id, slot_id)
+                }
+                Err(_) => {
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(page_id, guard.free_space() as u16);
+                    }
+                    drop(guard);
+
+                    let (new_page_id, _) = self.buffer_pool.new_page()?;
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(new_page_id, crate::PAGE_SIZE as u16);
+                    }
+                    available_pages.push(new_page_id);
+                    let mut new_guard = self.buffer_pool.fetch_page_mut(new_page_id)?;
+                    let slot_id = new_guard.page_mut().insert_tuple(&tuple_data)?;
+                    if let Some(fsm) = self.table_fsm.get(&table_id) {
+                        fsm.update(new_page_id, new_guard.free_space() as u16);
+                    }
+                    drop(new_guard);
+                    (new_page_id, slot_id)
+                }
+            };
+
+            self.row_locator.insert(table_id, row_id, final_page_id, slot_id);
+
+            let insert_record = InsertRecord {
+                row_id,
+                page_id: final_page_id,
+                slot_id,
+                tuple_data: tuple_data.clone(),
+            };
+
+            wal_entries.push(WalEntry {
+                lsn: Lsn(0),
+                txn_id,
+                entry_type: WalEntryType::Insert { row_id },
+                table_id,
+                data: insert_record.encode().to_vec(),
+            });
+
+            row_ids.push(row_id);
+        }
+
+        // Write all WAL entries without sync
+        self.wal.append_batch_nosync(wal_entries)?;
+
+        Ok(row_ids)
+    }
+
     /// Get a row by ID with visibility check.
     /// Uses row locator for O(1) lookup instead of page scanning.
     pub async fn get(

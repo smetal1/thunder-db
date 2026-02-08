@@ -999,6 +999,60 @@ impl WalWriterImpl {
     pub fn flushed_lsn(&self) -> Lsn {
         Lsn(self.flushed_lsn.load(Ordering::SeqCst))
     }
+
+    /// Append a WAL entry without waiting for fsync.
+    /// Used for DML within explicit transactions — durability is deferred to COMMIT.
+    pub fn append_nosync(&self, entry: WalEntry) -> Result<Lsn> {
+        let record_type = match &entry.entry_type {
+            WalEntryType::Insert { .. } => WalRecordType::Insert,
+            WalEntryType::Update { .. } => WalRecordType::Update,
+            WalEntryType::Delete { .. } => WalRecordType::Delete,
+            WalEntryType::Commit => WalRecordType::Commit,
+            WalEntryType::Abort => WalRecordType::Abort,
+            WalEntryType::Checkpoint { .. } => WalRecordType::Checkpoint,
+            WalEntryType::CreateTable { .. } => WalRecordType::CreateTable,
+            WalEntryType::DropTable { .. } => WalRecordType::DropTable,
+        };
+
+        let lsn = self.write_record(entry.txn_id, entry.table_id, record_type, &entry.data)?;
+
+        if matches!(entry.entry_type, WalEntryType::Commit | WalEntryType::Abort) {
+            self.remove_txn(entry.txn_id);
+        }
+
+        Ok(lsn)
+    }
+
+    /// Append multiple WAL entries without waiting for fsync.
+    pub fn append_batch_nosync(&self, entries: Vec<WalEntry>) -> Result<Vec<Lsn>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut lsns = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            let record_type = match &entry.entry_type {
+                WalEntryType::Insert { .. } => WalRecordType::Insert,
+                WalEntryType::Update { .. } => WalRecordType::Update,
+                WalEntryType::Delete { .. } => WalRecordType::Delete,
+                WalEntryType::Commit => WalRecordType::Commit,
+                WalEntryType::Abort => WalRecordType::Abort,
+                WalEntryType::Checkpoint { .. } => WalRecordType::Checkpoint,
+                WalEntryType::CreateTable { .. } => WalRecordType::CreateTable,
+                WalEntryType::DropTable { .. } => WalRecordType::DropTable,
+            };
+
+            let lsn = self.write_record(entry.txn_id, entry.table_id, record_type, &entry.data)?;
+            lsns.push(lsn);
+
+            if matches!(entry.entry_type, WalEntryType::Commit | WalEntryType::Abort) {
+                self.remove_txn(entry.txn_id);
+            }
+        }
+
+        Ok(lsns)
+    }
 }
 
 #[async_trait]
